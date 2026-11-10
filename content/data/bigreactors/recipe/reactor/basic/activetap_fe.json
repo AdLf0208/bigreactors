@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "building",
+  "key": {
+    "B": "minecraft:redstone_block",
+    "C": "bigreactors:basic_reactorcasing",
+    "S": "minecraft:redstone"
+  },
+  "pattern": [
+    "CBC",
+    "BSB",
+    "CBC"
+  ],
+  "result": {
+    "count": 1,
+    "id": "bigreactors:basic_reactorpowertapfe_active"
+  }
+}

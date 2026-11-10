@@ -1,0 +1,12 @@
+{
+  "type": "minecraft:blasting",
+  "category": "misc",
+  "cookingtime": 100,
+  "experience": 1.0,
+  "group": "bigreactors:graphite",
+  "ingredient": "minecraft:coal",
+  "result": {
+    "count": 1,
+    "id": "bigreactors:graphite_ingot"
+  }
+}

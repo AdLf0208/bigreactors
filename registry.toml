@@ -1,0 +1,49 @@
+id = "bigreactors"
+kind = "native-mod"
+name = "bigreactors"
+summary = "A Horizon port of bigreactors."
+description = """
+A port of [bigreactors](ZeroNoRyouki/ExtremeReactors2) for Horizon.
+
+**Implemented so far**
+
+- The smallest reactor the mod expresses end to end, with the jar's own numbers:
+- | in | what |
+- |---|---|
+- | `bigreactors:basic_reactorcasing` | the shell |
+- | `bigreactors:basic_reactorcontroller` | the machine: fuel, waste, heat, energy, on/off |
+- | `bigreactors:basic_reactorfuelrod` | the fuel column |
+- | `bigreactors:basic_reactorcontrolrod` | the assembly cap (top face) |
+- | `bigreactors:basic_reactorsolidaccessport` | the inventory fuel goes in through |
+
+**Not yet ported**
+
+- Turbine, reprocessor, energizer, fluidizer** — four more multiblocks, each
+- its own machines slice; the reactor's active (steam) mode goes with the
+- turbine.
+- Fluids** — the 10 fluid blocks, coolants, steam, the fluid ports and the
+- reactor's active cooling mode.
+- Ores and the metal chain** — yellorite ore (worldgen), the ore blocks, raw
+- yellorium, and the reprocessor's cyanite → yellorium loop. The ingots are
+- obtainable only by `give` until then.
+
+Original copyright and licence notices are kept in this repository. Pinned to
+Horizon 1d63e0a and horizon-mixins 5a64af93. Help with the remaining slices is
+welcome.
+"""
+authors = ["AdLf0208"]
+owners = ["AdLf0208"]
+owner_ids = [107615167]
+license = "MIT"
+source = "https://github.com/AdLf0208/bigreactors"
+icon = "icons/bigreactors.png"
+categories = ["utility"]
+tags = ["port", "horizon"]
+
+[[versions]]
+version = "0.1.0"
+published = "2026-11-10"
+game = "26.3"
+file = "bigreactors.hnmod"
+sha256 = "7310d7985c8da8e10fb8f114644c1ebcb1dc9e8dc63ff081178e34f9e575c330"
+changelog = "First release"

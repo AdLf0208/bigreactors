@@ -1,0 +1,20 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "building",
+  "key": {
+    "C": "bigreactors:basic_reactorcasing",
+    "H": "minecraft:hopper",
+    "M": "#c:ingots/iron",
+    "W": "#c:chests/wooden",
+    "X": "minecraft:piston"
+  },
+  "pattern": [
+    "CHC",
+    "MWM",
+    "CXC"
+  ],
+  "result": {
+    "count": 1,
+    "id": "bigreactors:basic_reactorsolidaccessport"
+  }
+}

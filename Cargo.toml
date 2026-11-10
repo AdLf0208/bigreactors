@@ -1,0 +1,18 @@
+[package]
+# Ported from: Extreme Reactors 2.4.28 (ZeroNoRyouki/ExtremeReactors2, MIT),
+# Minecraft Java 1.21.1 NeoForge. Clean-room Rust rewrite from the upstream
+# behaviour and the mod's own data files.
+name = "horizon-bigreactors"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "Extreme Reactors for Horizon, slice 1: the basic passive reactor"
+
+[lib]
+# This exact source is also injected as a same-crate module by horizon-mixins.
+path = "mixins/bigreactors/runtime.rs"
+
+[workspace]
+members = ["tools/audit"]
+resolver = "2"

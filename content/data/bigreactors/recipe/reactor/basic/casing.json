@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "building",
+  "key": {
+    "C": "#c:sands/colorless",
+    "G": "#c:ingots/graphite",
+    "I": "#c:ingots/iron"
+  },
+  "pattern": [
+    "IGI",
+    "GCG",
+    "IGI"
+  ],
+  "result": {
+    "count": 1,
+    "id": "bigreactors:basic_reactorcasing"
+  }
+}

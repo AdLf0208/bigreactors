@@ -1,0 +1,12 @@
+# Slice 1 of the Extreme Reactors port: the basic passive reactor.
+# Assets and data are carried from the ATM10 jar (ExtremeReactors2-1.21.1-2.4.28.jar);
+# licence MIT (ZeroNoRyouki/ExtremeReactors2), local-only until the maintainer
+# approves publishing.
+id = "bigreactors"
+name = "Extreme Reactors"
+version = "0.1.0"
+description = "Basic passive reactor: casing, controller, fuel rod, control rod, solid access port, active FE power tap (slice 1)"
+authors = ["ZeroNoRyouki"]
+api = "0.2"
+side = "both"
+capabilities = ["registries"]
