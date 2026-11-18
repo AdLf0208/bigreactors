@@ -1,29 +1,19 @@
-# Extreme Reactors for Horizon — slice 1
+# Extreme Reactors — a Horizon port
 
-A native Horizon port of **Extreme Reactors 2.4.28** (`ZeroNoRyouki/ExtremeReactors2`,
-MIT), the mod ATM10 ships as `bigreactors`. This is a **partial port**: it
-implements the basic passive **Reactor** end to end and records the rest as gaps.
+**Extreme Reactors** is a Minecraft mod. This repository is a **port of it to [Horizon](https://github.com/horizon-rust/horizon)**, the Rust engine for Minecraft Java 26.3. It carries the complete source of the port plus the content files it ships, and installs as a single `.hmod` package.
 
-Local-only for now: MIT allows derivatives, but publishing needs the maintainer's
-approval (`ARCHITECTURE.md` §8).
+Upstream: [ZeroNoRyouki/ExtremeReactors2](https://github.com/ZeroNoRyouki/ExtremeReactors2) — licence **MIT**.
 
-## The package
+| | |
+|---|---|
+| Upstream mod | Extreme Reactors ([source](https://github.com/ZeroNoRyouki/ExtremeReactors2)) |
+| Ported to | Horizon 0b14f8a, Minecraft Java 26.3, mod API `0.2` |
+| Package | `bigreactors.hmod` (install it with the Horizon launcher) |
+| Licence | **MIT** — the upstream mod's licence; see [Licence and credit](#licence-and-credit) |
 
-One flat **`.hmod`** (`bigreactors.hmod`), the SDK format of 2026-11-18: content and
-code in one package, so nothing else has to be installed.
+## What this port implements
 
-```text
-horizon-mod.toml     the only manifest: id, version 0.2.0, api 0.2, the [native] pins
-Cargo.toml           one crate; the only dependency is horizon-mod-api from .horizon/sdk/
-src/lib.rs           the one #[mod_api::horizon_mod] impl Hooks (glue and Parts)
-src/runtime.rs       the pure reactor physics, byte-identical to the 0.1.0 file, 20 tests
-assets/bigreactors/  carried blockstates, models, textures, item definitions and lang
-data/bigreactors/    carried block/item declarations, loot, recipes, a creative tab
-data/c/              the c:ingots/yellorium and c:ingots/graphite item tags
-LICENSE, LICENSE-NOTICE.md, icon.png
-```
-
-## What works
+### What works
 
 - **Build the book's first reactor**: a 3×3×3 (3 to 5 on each side) box of
   `basic_reactorcasing` with `basic_reactorcontroller`, `basic_reactorfuelrod`,
@@ -52,49 +42,47 @@ fuel rod, access port and power tap from iron/graphite/yellorium ingots
 (yellorium ingots come from yellorite ore, which is a worldgen gap — `give` them
 until then).
 
-## What does not (see `notes.md` for the full gap list)
+## Not yet ported
 
-- The **turbine**, **reprocessor**, **energizer** and **fluidizer** multiblocks;
-  the **reinforced** variant; **fluids** (coolants, steam, active cooling);
-  **ores/worldgen**.
-- **Control-rod insertion** (fixed at 0: the rod is the assembly cap), **solid
-  moderators** (air only), **waste ejection**, every **GUI**, the guide book.
-- The reactor's energy buffer lives in the controller and is exposed through the
-  tap only; upstream exposes it on every part.
+- **Turbine, reprocessor, energizer, fluidizer** — four more multiblocks, each
+- **Fluids** — the 10 fluid blocks, coolants, steam, the fluid ports and the
+- **Ores and the metal chain** — yellorite ore (worldgen), the ore blocks, raw
+- **The reinforced variant** — a second block set with 1.0 efficiency, 1,000
+- **Control-rod insertion** — the signature feature of the mod; needs a GUI or a
+- **Solid moderators** — graphite/iron/diamond blocks registered as moderators
+- **GUIs** — the controller's screen (fuel/waste/heat/energy bars), the port's
+- **Waste ejection** — waste currently fills the tank and then stops the
 
-## Build
+## Installing
 
-`cargo horizon-mod` reads `.horizon/sdk/` (fetched by any `cargo horizon-mod`
-command, never packed). `build-slot.sh` speaks the retired tools, so the SDK
-ladder runs **directly in the port** — with a build-slot lease around it when the
-campaign's compile slots are shared:
+1. Install the [Horizon launcher](https://github.com/horizon-rust/horizon/releases) (0.2.70 or newer).
+2. Add `bigreactors.hmod` to the instance's mods.
+3. The package is pinned to a specific Horizon build; the launcher checks that pin.
 
-```sh
-cd ports/bigreactors
-CARGO_INCREMENTAL=0 cargo test                  # the pure runtime + glue tests
-CARGO_INCREMENTAL=0 cargo clippy --all-targets -- -D warnings
-cargo fmt --check                               # not --all: it would read the fetched SDK
-rm -f Cargo.lock                                # a packed lock changes the artifact
-CARGO_INCREMENTAL=0 cargo horizon-mod build     # -> target/horizon-mod/bigreactors.hmod
-cp target/horizon-mod/bigreactors.hmod ./bigreactors.hmod
-cargo horizon-mod check bigreactors.hmod
-cargo horizon-mod fits bigreactors.hmod --build nightly
+## Licence and credit
+
+Extreme Reactors was created by its upstream authors; the code, models and assets in the original mod
+remain theirs and are used here under **MIT**. The Rust in this repository is a clean-room
+rewrite for Horizon, not a translation of the original source.
+
+- `LICENSE` — the upstream licence text.
+- `LICENSE-NOTICE.md` — what this port carries and where it came from.
+- The upstream project: https://github.com/ZeroNoRyouki/ExtremeReactors2
+
+## Technical details
+
+```
+horizon-mod.toml   package manifest (id, version, api, [native] pin)
+Cargo.toml         the crate; depends on `horizon-mod-api` from the fetched SDK
+src/               lib.rs (the one `impl Hooks`), runtime.rs (pure logic + tests), glue
+assets/ data/      the content the package ships
+tools/             content generators and the e2e scenario
 ```
 
-The in-game scenario needs a game the launcher built with the package:
-`horizon-launcher native-build ports/bigreactors --instance <instance>
---trust-native-code`, then `GAME=<that horizon-client> tools/e2e.sh`
-(`SELFTEST=1` flips its trajectory assertion so it must fail). The 0.1.0 `.hnmod`
-run stands as the behaviour's evidence; see `VALIDATION.md`.
+- Build: `cargo horizon-mod build` (packages; it does not compile against the game).
+- Test: `cargo test`, `cargo clippy --all-targets -- -D warnings`.
+- In-game: `ports/tools/launcher-game.sh run bigreactors` in the campaign tree, or install the
+  `.hmod` and play; the harness scenario is `tools/e2e.sh`.
 
-## Evidence
-
-`VALIDATION.md` has the ladder, the artifact's hash and the in-game logs
-(`ports/_shared/evidence/bigreactors/`). `FINDINGS.md` has the jar inventory, the
-upstream files read and every number with the file it came from.
-
-## Licence
-
-MIT, as the original. The original copyright and licence are the upstream
-project's; this port is a clean-room Rust rewrite written from the mod's observed
-behaviour, its own data files and its public source as an analysis aid.
+This repository is generated from the campaign's port at `ports/bigreactors/`; the port's own
+`notes.md` is the full record (decisions, traps, evidence).
