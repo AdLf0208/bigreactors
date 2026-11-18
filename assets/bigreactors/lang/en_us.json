@@ -1,0 +1,11 @@
+{
+  "block.bigreactors.basic_reactorcasing": "Reactor Casing (Basic)",
+  "block.bigreactors.basic_reactorcontroller": "Reactor Controller (Basic)",
+  "block.bigreactors.basic_reactorfuelrod": "Reactor Fuel Rod (Basic)",
+  "block.bigreactors.basic_reactorcontrolrod": "Reactor Control Rod (Basic)",
+  "block.bigreactors.basic_reactorsolidaccessport": "Reactor Solid Access Port (Basic)",
+  "block.bigreactors.basic_reactorpowertapfe_active": "Reactor Active Forge Energy Power Tap (Basic)",
+  "item.bigreactors.yellorium_ingot": "Yellorium Ingot",
+  "item.bigreactors.graphite_ingot": "Graphite Bar",
+  "itemGroup.bigreactors": "Extreme Reactors"
+}

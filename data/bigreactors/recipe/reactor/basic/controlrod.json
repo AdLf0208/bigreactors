@@ -1,0 +1,20 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "building",
+  "key": {
+    "C": "bigreactors:basic_reactorcasing",
+    "G": "#c:ingots/graphite",
+    "M": "#c:ingots/iron",
+    "R": "#c:dusts/redstone",
+    "X": "minecraft:piston"
+  },
+  "pattern": [
+    "CRC",
+    "MXM",
+    "CGC"
+  ],
+  "result": {
+    "count": 1,
+    "id": "bigreactors:basic_reactorcontrolrod"
+  }
+}
