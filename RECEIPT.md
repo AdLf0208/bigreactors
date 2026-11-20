@@ -1,19 +1,21 @@
-# Package receipt — bigreactors 0.2.4
+# Package receipt — extreme_reactors 0.2.4
 
-This tag's archive is the file below. Earlier sections of `notes.md` and `VALIDATION.md`
-describe earlier builds; where a digest there differs, **this receipt is the one that
-matches the release asset.**
+Extreme Reactors (called *Big Reactors* before 1.9). The jar's mod id, and the namespace of every
+block and item it registers, is still `bigreactors` — that is the mod's own choice for save
+compatibility, not our naming. The registry id, the file name and the listing use the project's
+current name.
 
 | field | value |
 |---|---|
 | version | `0.2.4` |
-| file | `bigreactors.hmod` |
+| file | `extreme_reactors.hmod` |
 | bytes | 81,742 |
 | sha256 | `c0168cedbb2a222886ec053ba0a4c6817956bb13ba5439eda04e9056e771c65b` |
 | source | this tag — the tree here is the source that produced the archive |
 | game | 26.3 |
 | horizon | `0b14f8acfd97fa2c750e42795249dcc981178ca4` |
 | horizon-mixins | `e59da9094f0c2fdda6c627fe9eff22dec6a906f0` |
+| content namespace | `bigreactors:` (the jar's mod id, unchanged) |
 
 ## Verification of these exact bytes
 
