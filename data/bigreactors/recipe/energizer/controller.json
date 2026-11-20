@@ -1,0 +1,20 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "building",
+  "key": {
+    "C": "bigreactors:energizercasing",
+    "X": "minecraft:comparator",
+    "D": "minecraft:glowstone",
+    "R": "minecraft:redstone_torch",
+    "G": "minecraft:gold_ingot"
+  },
+  "pattern": [
+    "CXC",
+    "DRD",
+    "CGC"
+  ],
+  "result": {
+    "count": 1,
+    "id": "bigreactors:energizercontroller"
+  }
+}

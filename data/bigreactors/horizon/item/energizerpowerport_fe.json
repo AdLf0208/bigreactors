@@ -1,0 +1,5 @@
+{
+  "template": "minecraft:beacon",
+  "block": "bigreactors:energizerpowerportfe",
+  "max_stack_size": 1
+}

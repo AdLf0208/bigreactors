@@ -1,0 +1,19 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "building",
+  "key": {
+    "G": "bigreactors:graphite_ingot",
+    "L": "minecraft:glass",
+    "M": "minecraft:iron_ingot",
+    "Y": "bigreactors:yellorium_ingot"
+  },
+  "pattern": [
+    "MGM",
+    "LYL",
+    "MGM"
+  ],
+  "result": {
+    "count": 1,
+    "id": "bigreactors:basic_reactorfuelrod"
+  }
+}

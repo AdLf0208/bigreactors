@@ -1,0 +1,14 @@
+{
+  "values": [
+    "bigreactors:basic_reactorcasing",
+    "bigreactors:basic_reactorcontroller",
+    "bigreactors:basic_reactorfuelrod",
+    "bigreactors:basic_reactorcontrolrod",
+    "bigreactors:basic_reactorsolidaccessport",
+    "bigreactors:basic_reactorpowertapfe_active",
+    "bigreactors:energizercasing",
+    "bigreactors:energizercell",
+    "bigreactors:energizercontroller",
+    "bigreactors:energizerpowerportfe"
+  ]
+}

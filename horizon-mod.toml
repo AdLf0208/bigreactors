@@ -1,0 +1,29 @@
+id = "bigreactors"
+name = "Extreme Reactors"
+version = "0.2.2"
+description = """A port of Extreme Reactors for Horizon: the book's first reactor and the energizer.
+A 3x3x3 basic reactor of casing, one fuel rod under a control rod, a controller, a solid access
+port and an active FE power tap forms from the blocks themselves and runs the jar's own passive
+simulation: 126.8 FE/t at steady state, ~0.028 mB of fuel a tick, the housing at ~410 degrees, and
+the tap's 50,000 FE buffer draining into a neighbour. The energizer is a second multiblock: a
+3..32 block box of casing with an interior of energy cells, a controller and a power port, whose
+capacity is the jar's per-block amount times the interior volume (a 3x3x3 holds 683,212,743,470,724
+FE) and whose port takes FE in or gives it out when the machine is on. The control rod is geometry
+in this slice; the turbine, reprocessor, fluidizer, fluids, ores, the reinforced variant,
+control-rod insertion, solid moderators, waste ejection and the GUIs are not ported yet."""
+authors = ["ZeroNoRyouki", "AdLf0208"]
+# A native mod: Rust in src/, compiled by the launcher against the game build [native] pins,
+# beside the data/ and assets/ of the same package. The id is the resource namespace and the
+# only identity: Cargo's package name and version are not the mod's.
+api = "0.2"
+# "both" is the installation side, not the hook's: the reactor runs on the server, and a LAN
+# host or a single-player world runs it inside the client installation.
+side = "both"
+# registries: "May add blocks, items, mob effects and entity types to your worlds": the six
+# reactor blocks and the two ingots are declarations under data/bigreactors/.
+capabilities = ["registries"]
+
+[native]
+game = "26.3"
+horizon = "0b14f8acfd97fa2c750e42795249dcc981178ca4"
+mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"

@@ -1,0 +1,19 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "building",
+  "key": {
+    "C": "bigreactors:energizercasing",
+    "2": "minecraft:iron_ingot",
+    "3": "minecraft:glowstone_dust",
+    "1": "minecraft:redstone_block"
+  },
+  "pattern": [
+    "C2C",
+    "313",
+    "C2C"
+  ],
+  "result": {
+    "count": 1,
+    "id": "bigreactors:energizerpowerport_fe"
+  }
+}
