@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.2.4 — 2026-11-20
+
+The tick's scan budget now covers capability scans (registry review finding).
+
+- **A capability call made inside a level tick is charged to the tick.** An
+  energizer's push asks each neighbour for its `capacity`, and a reactor's receive
+  face asks for its own when it accepts FE; both went through the one-scan path and
+  never touched `SCANS_PER_TICK`, so a tick could run one fresh box walk per
+  neighbour on top of its bounded share. `level_tick_pre` now opens the tick's
+  window and `level_tick_post` closes it after the tap pushes, and `ScanBudget`
+  charges an in-tick capability scan to the same share as the machines' own ticks.
+- **Nothing changed outside a tick**: a click, a command and a capability call
+  still cost one scan, so a player's readout is never refused.
+- **A budget refusal is a pause**: the capability answers 0 capacity / 0 accepted
+  (nothing moves into an unproven shape) and the machine is re-proven on a later
+  tick; the machine's own tick does not simulate either.
+- **The status readout gains `scans=`**: the busiest level tick's fresh-scan count
+  since the last read (a diagnostic like `t=`). A paused machine and a broken one
+  answer a capability call the same way, so this is how the game leg proves the
+  bound.
+- **Verified in game**: five machines invalidated in one tick run four fresh scans
+  with the fix and **seven** with only the policy reverted (the counterfactual leg);
+  an energizer serves two adjacent reactors; five status reads outside a tick are
+  still free; all five machines recover.
+
+## 0.2.3 — 2026-11-20
+
+Bounded tick cost for the formation scan (registry review finding).
+
+- **A block change no longer drops every machine's formation.** Each controller
+  keeps the proof of its machine's shape with the box that proof depends on; a
+  committed block change drops only the proofs it can touch — a change inside the
+  box (the shell or the interior) always, a machine part in the one-block ring
+  because it can join the connected component and grow the box, and nothing
+  further out. An unrelated break now leaves every controller's scan standing, so
+  a busy world no longer makes every reactor and energizer re-walk its box every
+  tick.
+- **One scan answers a whole machine.** The scan names every controller of the
+  component, so a reactor with two controllers is scanned once, not once per
+  controller.
+- **Total work per tick is bounded.** At most four fresh formation scans run in a
+  level tick (`SCANS_PER_TICK`), refilled at `level_tick_post`; a scan that
+  starts always finishes. A machine the budget cannot reach reports "not formed
+  (the shape is waiting to be re-checked)" for that tick instead of running on a
+  shape nothing re-checked — a pause, never stale energy.
+- **A world change clears the proofs** (`world_lifecycle`), not only the tap
+  queue.
+- **Verified in game**: the energizer's readout is unchanged by a break two blocks
+  outside its shell, and a broken casing is re-proven as "not formed (the shell
+  has a hole in it)" and forms again when the casing is replaced (phases E8/E8b).
+
 ## 0.2.2 — 2026-11-20
 
 The energizer, plus the recipe, tag and loot defects the parity rule exposed.

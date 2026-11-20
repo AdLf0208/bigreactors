@@ -14,7 +14,7 @@ One flat **`.hmod`** (`bigreactors.hmod`), the SDK format of 2026-11-18: content
 code in one package, so nothing else has to be installed.
 
 ```text
-horizon-mod.toml     the only manifest: id, version 0.2.2, api 0.2, the [native] pins
+horizon-mod.toml     the only manifest: id, version 0.2.3, api 0.2, the [native] pins
 Cargo.toml           one crate; the only dependency is horizon-mod-api from .horizon/sdk/
 src/lib.rs           the one #[mod_api::horizon_mod] impl Hooks (glue and Parts)
 src/runtime.rs       the pure reactor and energizer logic, 38 tests

@@ -4,6 +4,76 @@ Campaign pin: Horizon `1d63e0a5a37a7a708eb0b32b49bf0dfeb28ed8a9`,
 horizon-mixins `5a64af938ec86b00d53d16a408aabc0038fb3e57` (schema 6).
 Everything below was run at that pin; the logs named are the evidence.
 
+## 0.2.4 — the tick budget covers capability scans (2026-11-20)
+
+At the working pin **`0b14f8a`** + mixins **`e59da90`**. Every command ran directly in
+the port with `CARGO_INCREMENTAL=0` inside a build-slot lease; the logs are
+`ports/_shared/evidence/bigreactors/sdk-*.log` and `…/bigreactors-e2e/`.
+
+| step | command | result |
+|---|---|---|
+| red | `cargo test --offline` before the fix | **54 passed, 1 failed** — `a_capability_scan_inside_a_tick_is_charged_to_the_tick`, `left: 6, right: 4` (`sdk-test-red.log`) |
+| tests | `cargo test --offline` | **56 passed, 0 failed** (`sdk-test.log`) |
+| clippy | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| fmt | `cargo fmt --check` | clean, no output (`sdk-fmt.log`) |
+| build | `rm -f Cargo.lock && cargo horizon-mod build` | `Built ./target/horizon-mod/bigreactors.hmod` (`sdk-build.log`) |
+| repeat | build again | `cmp` byte-identical (`sdk-reproducible.txt`) |
+| check | `cargo horizon-mod check bigreactors.hmod` | `bigreactors 0.2.4 (native-mod, format native-1/0b14f8a/e59da90, for 26.3)`, **81,742 B**, **EXIT 0** (`sdk-check.log`) |
+| fits (pin) | `cargo horizon-mod fits bigreactors.hmod --build 0b14f8a` | `0b14f8a  made for`, EXIT 0 (`sdk-fits.log`) |
+| fits (another) | `cargo horizon-mod fits bigreactors.hmod` | `0a875da  fits`, EXIT 0 (same log) |
+| package gate | `python3 ports/tools/verify-sdk-package.py bigreactors` | **1/1** |
+
+Delivered artifact: `bigreactors.hmod` **81,742 B**, SHA-256
+`c0168cedbb2a222886ec053ba0a4c6817956bb13ba5439eda04e9056e771c65b`, 107 entries, no
+`Cargo.lock`. `src/runtime.rs` is untouched by this fix (sha256 `934fec99…b02b`).
+
+In game (`ports/_shared/evidence/bigreactors-e2e/`, `--offscreen`):
+
+| log | leg | verdict |
+|---|---|---|
+| `e2e-launcher.log` | every earlier phase unchanged, plus F1 (an energizer serves two adjacent reactors: B 9,253 → 216,000 FE), F2 (five machines invalidated in one tick → `scans=4`), F3 (five status reads outside a tick still scan freely), F4 (all five recover) | **PASS + EXIT:0** |
+| `e2e-launcher-counterfactual-unbudgeted.log` | the same package with only `charge` reverted to 0.2.3's policy | **`FAIL: … ran 7 fresh scans, not the budgeted 4` + EXIT:1** |
+| `e2e-launcher-control.log` | the same Nightly **without** the package | **FAIL + EXIT:1** |
+| `e2e-launcher-selftest.log` | `SELFTEST=1`, the reactor trajectory assertion flipped | **FAIL + EXIT:1** |
+| `e2e-launcher-negative.log` | `NEGATIVE=1`, the energizer capacity assertion flipped | **FAIL + EXIT:1** |
+| `e2e-launcher-peak-negative.log` | `PEAK_NEGATIVE=1`, one fresh scan past the budget expected | **FAIL + EXIT:1** |
+
+`python3 ports/tools/check-e2e-logs.py bigreactors-e2e --strict` → **6/6**;
+`python3 ports/tools/check-e2e-logs.py bigreactors --strict` → **3/3** (the retired
+0.1.0 logs).
+
+## 0.2.3 — bounded formation scans (2026-11-20)
+
+At the working pin **`0b14f8a`** + mixins **`e59da90`**. Every command ran directly in
+the port with `CARGO_INCREMENTAL=0` inside a build-slot lease; the logs are
+`ports/_shared/evidence/bigreactors/sdk-*.log`.
+
+| step | command | result |
+|---|---|---|
+| tests | `cargo test --offline` | **53 passed, 0 failed** (`sdk-test.log`) |
+| clippy | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| fmt | `cargo fmt --check` | clean (`sdk-fmt.log`) |
+| build | `rm -f Cargo.lock && cargo horizon-mod build` | `Built ./target/horizon-mod/bigreactors.hmod` (`sdk-build.log`) |
+| repeat | build again | `cmp` byte-identical (`sdk-reproducible.txt`) |
+| check | `cargo horizon-mod check bigreactors.hmod` | `bigreactors 0.2.3 (native-mod, format native-1/0b14f8a/e59da90, for 26.3)`, **79,837 B**, **EXIT 0** (`sdk-check.log`) |
+| fits | `cargo horizon-mod fits bigreactors.hmod --build 0b14f8a` | `0b14f8a  made for`, EXIT 0 (`sdk-fits.log`) |
+| package gate | `python3 ports/tools/verify-sdk-package.py bigreactors` | **1/1** |
+
+Delivered artifact: `bigreactors.hmod` **79,837 B**, SHA-256
+`e8dcf1df35d35341e56e128bc9ec9c35efff05ece485921349b018a65ee8ba46`, 107 entries, no
+`Cargo.lock`. `src/runtime.rs` is untouched by this fix.
+
+In game (`ports/_shared/evidence/bigreactors-e2e/`, `--offscreen`):
+
+| log | leg | verdict |
+|---|---|---|
+| `e2e-launcher.log` | every earlier phase unchanged, plus E8 (an unrelated break leaves the formed energizer's readout identical) and E8b (a broken casing reads "not formed (the shell has a hole in it)" and forms again when replaced) | **PASS + EXIT:0** |
+| `e2e-launcher-control.log` | the same Nightly **without** the package | **FAIL + EXIT:1** |
+| `e2e-launcher-selftest.log` | `SELFTEST=1`, the reactor trajectory assertion flipped | **FAIL + EXIT:1** |
+| `e2e-launcher-negative.log` | `NEGATIVE=1`, the energizer capacity assertion flipped | **FAIL + EXIT:1** |
+
+`python3 ports/tools/check-e2e-logs.py bigreactors-e2e --strict` → **4/4**.
+
 ## 0.2.2 — the energizer and the parity leg (2026-11-20)
 
 At the working pin **`0b14f8a`** + mixins **`e59da90`**. Every command ran

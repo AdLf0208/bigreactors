@@ -1,6 +1,6 @@
 id = "bigreactors"
 name = "Extreme Reactors"
-version = "0.2.2"
+version = "0.2.4"
 description = """A port of Extreme Reactors for Horizon: the book's first reactor and the energizer.
 A 3x3x3 basic reactor of casing, one fuel rod under a control rod, a controller, a solid access
 port and an active FE power tap forms from the blocks themselves and runs the jar's own passive

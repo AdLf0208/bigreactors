@@ -390,6 +390,10 @@ paired with a `NEGATIVE=1` counterfactual:
 | graphite block (storage) + its coal-block recipes | not ported — the block is part of the ore/metal-chain gap; the two dead recipes are dropped |
 | `c:` tags used by the carried recipes | not loaded — Horizon mounts only the package's own namespace (`data/bigreactors/`), so the recipes use direct item ids; the craft phase proves them |
 | cross-energizer transfer (two machines) | blocked(no-energy-cable) — two adjacent energizers merge into one invalid box (upstream assimilates them too); the output is proven into the reactor's receive face instead |
+| an energizer serving two adjacent machines | tested — phase F1 (reactor B against the energizer's second output port gains 9,130 → 216,000 FE) |
+| one tick's fresh formation scans are bounded | tested — phase F2 (`scans=4` after a fill invalidates five machines in one tick; the un-budgeted build reads 7, see `e2e-launcher-counterfactual-unbudgeted.log`) |
+| a capability/action scan outside a tick is not budgeted | tested — phase F3 (five status reads after the same break all report the hole, none "waiting to be re-checked") |
+| a paused machine recovers on a later tick | tested — phase F4 (all five units form again once their casing is replaced) |
 | turbine, reprocessor, fluidizer | not ported — later machines slices (the turbine needs fluids/steam) |
 | energizer charging port, computer port, status display | not ported — item charging needs an energy item; CC:Tweaked is not ported |
 | energizer GUI (controller on/off, port direction) | deviation — right-click, no screen |
@@ -533,3 +537,245 @@ Each item below is quoted from `ports/_shared/horizon-mods/reviews/pr-*-bigreact
   **Repair:** **Staging (orchestrator, not ours)**: the artifact is not in registry release/staging as `<sha256>.<ext>`; the orchestrator answers it with `horizon-mods#686` (no write access to the registry's releases). Every repackaged artifact below has a fresh sha256 for that re-push, and the author release must be re-uploaded from the port repository.
 
 Skills: superpowers/using-superpowers,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices,rust-port
+
+## Review fix (2026-11-20) — the formation scan's tick cost is bounded (0.2.3)
+
+**The finding** (`levzzz5154`, 2026-11-20): every energizer controller scanned its
+connected structure, and `src/lib.rs` invalidated the scan cache on **unrelated** block
+changes, so a busy world made every machine re-walk its box on the next tick; the
+per-scan cap in `src/runtime.rs` (`MAX_ENERGIZER_CELLS`, the during-walk span check)
+bounds one scan, not the total work a tick.
+
+### What changed (glue only — `src/runtime.rs` is untouched)
+
+| Before | Now |
+|---|---|
+| `block_changed` cleared the whole reactor cache and the whole energizer cache | drops only the proofs a change can touch: inside a machine's box always (shell or interior), a **machine part** in the one-block ring (it can join the connected component and grow the box), nothing further out; another level's change touches nothing |
+| a scan was keyed by the controller that happened to tick | one scan is recorded for **every controller of the component** (the reactor's box walk names them; the energizer's `shape.controllers` already did) |
+| no bound on fresh scans per tick | `SCANS_PER_TICK = 4` paid from `ScanBudget`, refilled at `level_tick_post`; a scan that starts always finishes. A machine the budget cannot reach answers `"the shape is waiting to be re-checked"` for that tick, so the reactor pauses and an energizer's port reports `formed=false` — a pause, never energy from a shape nothing re-checked |
+| `world_lifecycle` cleared only the tap queue | also drops both proof maps (a proof names a `LevelRef` of the old world) and refills the budget |
+
+An unformed group has no box, so its proof carries the largest box a machine at that
+controller could still occupy (reactor: 4 blocks each way; energizer:
+`ENERGIZER_MAX_SIDE - 1`) — the region that can make it form. A player action
+(`/bigreactors status`, a right-click) and a capability call scan unbudgeted: one
+scan for one action, not per-tick work.
+
+Every lock is taken fatally (`.expect("…")`), as the campaign's rule says: a poisoned
+cache or budget would otherwise degrade silently — rescanning every tick, or refusing
+every scan for the rest of the session.
+
+**Why a pause is right:** the alternative — answering from a proof the change may have
+invalidated — would keep a broken machine generating until its turn came. Pausing
+costs at most a few ticks and only when more than four machines' topology changed in
+one tick.
+
+### Tests (written first, watched red)
+
+`src/lib.rs` tests, all in the glue because the cache and the budget are the glue's:
+`an_unrelated_block_change_does_not_force_a_rescan`, `a_part_in_the_ring_is_re_proven`,
+`a_change_in_another_level_leaves_the_proof_alone`,
+`one_scan_answers_every_controller_of_a_component`,
+`the_tick_budget_bounds_fresh_scans`, `the_ring_only_matters_when_a_machine_part_moves`,
+and the rewritten `a_formation_is_answered_from_the_cache_until_it_is_cleared`.
+The red was proved by restoring the old semantics (`invalidate` = clear the map,
+`take` = always true, `change_affects` = always true): **5 failed, 48 passed**; the fix
+restored **53 passed, 0 failed**.
+
+### In-game proof (phases E8/E8b, `--offscreen`, the launcher build)
+
+```
+  before: Energizer at 100,102,-2: formed 3x3x3, 1 cells, 50000/683212743470724 FE, active false, t=…
+  after an unrelated break: Energizer at 100,102,-2: formed 3x3x3, 1 cells, 50000/683212743470724 FE, active false, t=…
+  after a shell break: Energizer at 100,102,-2: not formed (the shell has a hole in it), active false, t=…
+  after the casing is replaced: Energizer at 100,102,-2: formed 3x3x3, 1 cells, 50000/683212743470724 FE, active false, t=…
+```
+
+E8 breaks the floor **two blocks north of the shell** (outside the box and its ring) and
+asserts the readout is identical with `t=` stripped; E8b breaks the top-face casing and
+asserts the readout *does* change, then replaces it and asserts the machine forms again.
+E8b is the differential that keeps E8 from being a comparison that cannot change; the
+"no rescan" itself is pinned by the unit test, since a rescan of an intact machine
+produces the same readout.
+
+### Ladder and package (0.2.3)
+
+| Step | Command | Result |
+|---|---|---|
+| tests | `cargo test --offline` | **53 passed, 0 failed** (`evidence/bigreactors/sdk-test.log`) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| format | `cargo fmt --check` | clean (`sdk-fmt.log`) |
+| package | `rm -f Cargo.lock && cargo horizon-mod build` twice | **79,837 B**, sha256 `e8dcf1df…ba46`, `cmp` identical (`sdk-build.log`, `sdk-build-second.log`, `sdk-reproducible.txt`) |
+| check | `cargo horizon-mod check bigreactors.hmod` | `bigreactors 0.2.3 (native-mod, format native-1/0b14f8a…/e59da90…, for 26.3)`, exit 0 (`sdk-check.log`) |
+| fits | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  made for`, exit 0 (`sdk-fits.log`) |
+| package gate | `python3 ports/tools/verify-sdk-package.py bigreactors` | **1/1** (107 entries, no packed lock) |
+| in game | `ports/tools/launcher-game.sh run bigreactors` | **`PASS` + `EXIT:0`** (`evidence/bigreactors-e2e/e2e-launcher.log`) |
+| control | `GAME=$CONTROL_GAME`, same script | **`FAIL: give bigreactors:basic_reactorcasing failed` + `EXIT:1`** |
+| counterfactual | `SELFTEST=1` / `NEGATIVE=1` | **`EXIT:1`** each (`e2e-launcher-selftest.log`, `e2e-launcher-negative.log`) |
+| log gate | `python3 ports/tools/check-e2e-logs.py bigreactors-e2e --strict` | `logs=4 ok=4 missing-exit=0 bad-exit=0` |
+
+### Changelog for the resubmission (supersedes 0.2.2)
+
+> **0.2.3 — bounded formation scans.** A block change now drops only the machines it
+> can touch (inside the box, or a machine part in the one-block ring), one scan answers
+> every controller of a machine, and at most four fresh scans run per tick; a machine
+> the budget cannot reach pauses that tick instead of running on an unproven shape.
+> `src/runtime.rs` is unchanged. Package: **107 entries, 79,837 B**, sha256
+> `e8dcf1df35d35341e56e128bc9ec9c35efff05ece485921349b018a65ee8ba46`; `check` and `fits`
+> exit 0; 53 tests, clippy `-D warnings` clean; in game `PASS` + `EXIT:0`, the unmodded
+> Nightly `EXIT:1`, `SELFTEST=1` and `NEGATIVE=1` `EXIT:1`.
+
+Skills: superpowers/using-superpowers,systematic-debugging,test-driven-development,verification-before-completion; BeautifulRust/rust-best-practices
+
+## Review fix (2026-11-20) — the tick budget covers capability scans (0.2.4)
+
+**The finding** (2026-11-20 15:14, PR #1450), verbatim:
+
+> 0.2.3 shares scans and narrows invalidation, but the tick cap is still bypassable in normal
+> play: an energizer tick queries its adjacent reactor's energy `capacity`
+> (`src/lib.rs:838–842`), which calls `read_scan` with `Budget::Once` (`198–202,959–963`).
+> Charge capacity queries originating in a tick to the same budget; test multiple adjacent
+> machines.
+
+It was real: `ReactorInput::capacity`/`insert` and the energizer's push went through
+`read_scan`/`energizer_read_scan` with the one-scan intent, so a capability call made *inside* a
+level tick never touched [`SCANS_PER_TICK`]. A tick could run one fresh box walk per neighbour
+on top of its own bounded share.
+
+### What changed (glue only — `src/runtime.rs` is untouched)
+
+| Before | Now |
+|---|---|
+| `Budget::Once` was always free; the tick's share bounded only `Budget::Tick` | `Budget::Action` is free **outside** a tick and charged **inside** one: `ScanBudget::charge` consults `tick_open` |
+| nothing marked a level tick | `level_tick_pre` (stamped at the pin) opens the window with the full share; `level_tick_post` closes it **after** the tap pushes, because a push asks the neighbour for its `capacity` and is still the tick's work |
+| `world_lifecycle` refilled the share | it resets the window too (no tick is running in a new world) |
+| the status readout had no way to show the bound | `scans=<n>` on the reactor and energizer lines: the busiest level tick's fresh-scan count since the last read (a diagnostic like `t=`, cleared by each read). A paused machine and a broken one answer a capability call the same way, so this is how a game run proves the bound |
+
+The count is taken in `ScanBudget::allow_scan`, **after** the budget decision, so it reports the
+work a tick really did — a scan let through unbilled would still be counted (that is what the
+counterfactual run below measures). No `bool` parameter, no new `unsafe`, no `unwrap` outside
+tests, and the non-tick paths are unchanged: a click, a command and a capability call outside a
+tick still cost one scan.
+
+A budget refusal on the capability path answers **0 capacity / 0 accepted** (the SDK's energy
+capability has no "unknown" state), which is a pause: nothing moves into an unproven shape, and
+the machine is re-proven on a later tick. The reactor's own tick returns early on a refusal, so
+it does not simulate either — no fuel burnt, no FE made from a shape nothing re-checked.
+
+### Tests (written first, watched red)
+
+The seam was extracted first as a behaviour-preserving refactor (`Budget::Once` → `Action`,
+`ScanBudget::charge`, `level_tick_pre`), verified green at **53 passed** before any new test.
+Then the new tests failed against the unfixed policy — the red, verbatim
+(`evidence/bigreactors/sdk-test-red.log`):
+
+```
+---- tests::a_capability_scan_inside_a_tick_is_charged_to_the_tick stdout ----
+
+thread 'tests::a_capability_scan_inside_a_tick_is_charged_to_the_tick' (23492) panicked at src/lib.rs:1656:9:
+assertion `left == right` failed: a capability scan inside a tick must come out of the tick's share
+  left: 6
+ right: 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::a_capability_scan_inside_a_tick_is_charged_to_the_tick
+
+test result: FAILED. 54 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+`left: 6` is six fresh capability scans inside one tick against a share of four — the bypass.
+After the fix: **56 passed, 0 failed**. The tests:
+
+- `a_capability_scan_inside_a_tick_is_charged_to_the_tick` — several adjacent machines
+  (`SCANS_PER_TICK + 2`) inside one tick: four scan, two pause, and a machine paused by the
+  budget recovers on a later tick; the readout reports the tick's four.
+- `a_capability_scan_outside_a_tick_is_one_free_scan` — the control: eight capability calls
+  outside a tick all run. If the fix had budgeted everything, this fails.
+- `the_readout_reports_the_busiest_tick_and_clears_it` — the diagnostic counts every fresh scan
+  of a tick, ignores one outside a tick, and is cleared by a read. (This test caught a real
+  defect in the counter: `end_tick` folded `tick_scans` into the peak but did not clear it, so a
+  second read re-reported the old tick.)
+
+### In-game proof (phases F1–F4, `--offscreen`, the launcher build)
+
+```
+== F1: one energizer serves two adjacent machines ==
+  Reactor at 99,102,-3: formed 3x3x3, 1 fuel rods, 1 control rods, 0/216000 FE, ... active false, t=4492, scans=4
+  Reactor at 99,102,-3: formed 3x3x3, 1 fuel rods, 1 control rods, 846/216000 FE, ... active true, t=4545, scans=0
+  before: reactor B 9253 FE
+  after: reactor B 9253 -> 216000 FE
+== F2: a tick that invalidates more machines than the budget runs only the budget ==
+  before the break: Reactor at 100,102,-18: formed 3x3x3, ... active true, t=5715, scans=4
+  after the break: Reactor at 100,102,-18: not formed (the shell has a hole in it), fuel 3980, active true, t=5891, scans=4
+== F3: control - a status read outside a tick is still one free scan ==
+  unit 0: Reactor at 100,102,-18: not formed (the shell has a hole in it), ... scans=0
+  ... unit 4 the same, none "waiting to be re-checked"
+== F4: every unit forms again once its casing is replaced ==
+  unit 0..4: Reactor at ..., formed 3x3x3, 1 fuel rods, 1 control rods, ... scans=4/0
+```
+
+- **F1** puts reactor B against the energizer's second output port and flips the first port to
+  input, so the energizer's push can only reach B: B goes 9,253 → 216,000 FE (its buffer fills),
+  with two adjacent reactors both queried for capacity.
+- **F2** builds five energizer+reactor units in a line, switches every reactor and energizer on
+  (each reactor's tap charges its energizer, whose output port pushes back), then invalidates all
+  five reactors' proofs in **one** command (`fill … air replace bigreactors:basic_reactorcasing`).
+  The tick after it ran **four** fresh scans (`scans=4`) — the share — while five machines needed
+  re-proving.
+- **F3** is the control: five status reads after that break each re-prove their machine for free
+  ("the shell has a hole in it", never "waiting to be re-checked"), so the fix did not simply
+  budget everything.
+- **F4** replaces the two casings the fill took from each unit and asserts all five form again.
+- **The counterfactual that proves the assertion can fail**
+  (`e2e-launcher-counterfactual-unbudgeted.log`): the same package with only `charge` reverted to
+  0.2.3's policy (a capability scan always free) — nothing else changed — runs the same scenario
+  and reports `scans=7`:
+
+  ```
+  FAIL: a tick with 5 invalidated machines ran 7 fresh scans, not the budgeted 4: Reactor at 100,102,-18: not formed (the shell has a hole in it), fuel 3980, active true, t=5805, scans=7
+  ```
+
+  So the five-machine scenario really does exceed the share without the fix — the five machines'
+  own re-proofs plus the capability scans the old code ran unbilled — and the readout catches it.
+
+### Ladder and package (0.2.4)
+
+| Step | Command | Result |
+|---|---|---|
+| tests | `cargo test --offline` | **56 passed, 0 failed** (`evidence/bigreactors/sdk-test.log`) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| format | `cargo fmt --check` | clean, no output (`sdk-fmt.log`) |
+| package | `rm -f Cargo.lock && cargo horizon-mod build` twice | **81,742 B**, sha256 `c0168ced…c65b`, `cmp` identical (`sdk-build.log`, `sdk-build-second.log`, `sdk-reproducible.txt`) |
+| check | `cargo horizon-mod check bigreactors.hmod` | `bigreactors 0.2.4 (native-mod, format native-1/0b14f8a…/e59da90…, for 26.3)`, exit 0 (`sdk-check.log`) |
+| fits (pin) | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  made for`, exit 0 (`sdk-fits.log`) |
+| fits (another build) | `cargo horizon-mod fits bigreactors.hmod` | `0a875da  fits`, exit 0 (same log) — the pin run is a tautology for a package made for the pin |
+| package gate | `python3 ports/tools/verify-sdk-package.py bigreactors` | **1/1** (107 entries, no packed lock) |
+| in game | `tools/e2e.sh` on the launcher build | **`PASS` + `EXIT:0`** (`evidence/bigreactors-e2e/e2e-launcher.log`) |
+| control | `GAME=$CONTROL_GAME`, same script | **`FAIL: give bigreactors:basic_reactorcasing failed` + `EXIT:1`** |
+| counterfactual | the same package with `charge` reverted | **`FAIL: … ran 7 fresh scans, not the budgeted 4` + `EXIT:1`** |
+| selftest | `SELFTEST=1` | **`EXIT:1`** (`e2e-launcher-selftest.log`) |
+| negative | `NEGATIVE=1` | **`EXIT:1`** (`e2e-launcher-negative.log`) |
+| peak negative | `PEAK_NEGATIVE=1` | **`EXIT:1`** (`e2e-launcher-peak-negative.log`) |
+| log gate | `python3 ports/tools/check-e2e-logs.py bigreactors-e2e --strict` | `logs=6 ok=6 missing-exit=0 bad-exit=0` |
+
+`src/runtime.rs` is untouched by this slice (sha256 `934fec997f29…b02b`; it gained the energizer in
+0.2.2, which is why it differs from the 0.2.0 note above).
+
+### Changelog for the resubmission (supersedes 0.2.3)
+
+> **0.2.4 — the tick budget covers capability scans.** A capability call made inside a level
+> tick (an energizer's push asking a neighbour for its `capacity`, a reactor's receive face
+> accepting FE) is now charged to the same `SCANS_PER_TICK` share as the machines' own ticks;
+> outside a tick a click, a command or a capability call still costs one scan. `level_tick_pre`
+> opens the window and `level_tick_post` closes it after the tap pushes. The status readout gains
+> `scans=` (the busiest tick's fresh scans since the last read), and a game leg with five machines
+> invalidated in one tick proves the bound: 4 with the fix, 7 without it. `src/runtime.rs` is
+> unchanged. Package: **107 entries, 81,742 B**, sha256
+> `c0168cedbb2a222886ec053ba0a4c6817956bb13ba5439eda04e9056e771c65b`; `check` exit 0,
+> `fits` exit 0 against the pin (`made for`) and against build `0a875da` (`fits`); 56 tests,
+> clippy `-D warnings` clean; in game `PASS` + `EXIT:0`, the unmodded Nightly `EXIT:1`, the
+> reverted-policy counterfactual `EXIT:1`, `SELFTEST=1`, `NEGATIVE=1` and `PEAK_NEGATIVE=1` `EXIT:1`.
+
+Skills: superpowers/using-superpowers,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
