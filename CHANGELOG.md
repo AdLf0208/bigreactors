@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.2.5 — 2026-11-21
+
+Council review findings on PR #1501 (one record, one visit, membership on access; plus the
+0.2.1 partial-fuel follow-up). All four were real and are fixed.
+
+- **One formation record per machine.** The cache stored `Result<T, String>` and cloned the whole
+  record for **every controller** of a machine (`Formations::insert`); a 32³ energizer's shell can
+  be 5,768 controller/port blocks, so 0.2.4 held 5,768 × 5,768 coordinates ≈ **381 MiB**. The
+  answer is now `Result<Arc<T>, Arc<str>>` and the hand-written `Proven::clone` copies two `Arc`s:
+  one record per machine, shared by every controller and every port it answers through. A port's
+  capability lookup is the same cache hit a controller's tick gets, because a scan now registers
+  for the machine's controllers **and** its ports.
+- **Ports are visited once per machine per tick.** Every controller used to walk every port (and
+  wrote `cx/cy/cz` into each one even while the machine was off): a controller/port split cost
+  N × P visits — over 8 million on a 32³ shell. The machine's tick now runs on one **master
+  controller** (the lowest coordinate) and `visit_machine_ports` claims the machine once per level
+  tick, so the cost is P; a switched-off machine walks nothing. `announce_port` is deleted.
+  Status gains `visits=`, the ports the machine served in the last tick.
+- **Membership on port access.** A port answered from the controller coordinates it remembered plus
+  the controller's `formed` byte, so after a machine was rebuilt smaller around the same controller
+  a detached old port still reached the energy buffer. The port now floods the formation **from its
+  own position** and must be in the current shape: not a member → 0 capacity, 0 accepted. The saved
+  coordinates, the `formed` bit and the saved `capacity` are gone; an off machine reports 0 both
+  ways, as upstream's inactive machine refuses both.
+- **Partial fuel take (0.2.1 follow-up).** The access port cleared its whole stack and the reactor
+  dropped what did not fit. `Reactor::ingots_that_fit` now bounds the take to whole ingots of the
+  tank's remaining room and `take_fuel` writes the remainder back into the slot with
+  `ItemStack::split`.
+- **Any controller is the control surface**: a click toggles the machine's master, so a second
+  controller shows and switches the same machine.
+- **Verified**: 62 tests (the two unit reds: 4 deep copies → 0, and 8 visits → 2);
+  `fits` against the pin (`made for`) and against `0b14f8a` (`fits`); in game a 4-ingot stack into
+  3,000 mB of room leaves three ingots in the port, a 5³ → 3³ rebuild leaves the old port
+  `not formed` and the buffer at 0 while the tap beside it offers 15,470 FE (the new port then
+  charges 1,109 → 25,910), and a two-controller machine reads `visits=2` on and `visits=0` off.
+  The same three phases against the delivered 0.2.4 package fail.
+
 ## 0.2.4 — 2026-11-20
 
 The tick's scan budget now covers capability scans (registry review finding).

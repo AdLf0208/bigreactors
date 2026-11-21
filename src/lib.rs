@@ -14,7 +14,7 @@
 pub mod runtime;
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use mod_api::*;
 
@@ -51,6 +51,12 @@ const ENERGIZER_PORT: &str = "bigreactors:energizerpowerportfe";
 /// A tap position queued for this tick's energy moves. A ticked block entity is out of the
 /// world, so its own tick cannot hand FE to a neighbour; `level_tick_post` can.
 static TAP_QUEUE: Mutex<Vec<(LevelRef, [i32; 3])>> = Mutex::new(Vec::new());
+
+/// A formation answer. The machine record is shared: every controller of one machine,
+/// and every port it answers for, holds the *same* allocation. A 32³ energizer's shell
+/// can be 5,768 controller/port blocks, so a per-controller copy of the coordinate
+/// list was 381 MiB of duplicate data (review 2026-11-21, finding 1).
+type Answer<T> = Result<Arc<T>, Arc<str>>;
 
 /// One machine type's proven formations, by controller position.
 type Proofs<T> = Mutex<Option<Formations<(LevelRef, [i32; 3]), T>>>;
@@ -198,16 +204,133 @@ fn take_scan_peak() -> u32 {
         .take_peak()
 }
 
+/// The machines whose ports this level tick has already visited, by master controller.
+///
+/// One machine may have many controllers (its shell is made of them as readily as of
+/// casing), and each of them gets a block entity tick. Without this, N controllers
+/// walked the machine's P ports: N × P visits per tick, over 8 million on a 32³ shell.
+/// The machine's first controller to tick claims it, so the cost is P.
+struct MachineTicks {
+    done: Vec<(LevelKey, [i32; 3])>,
+}
+
+impl MachineTicks {
+    const fn new() -> Self {
+        Self { done: Vec::new() }
+    }
+
+    /// A level tick opened: no machine has been served in it yet.
+    fn begin(&mut self) {
+        self.done.clear();
+    }
+
+    /// Take this tick's work for the machine whose master is `machine`.
+    fn claim(&mut self, level: LevelKey, machine: [i32; 3]) -> bool {
+        if self.done.contains(&(level, machine)) {
+            return false;
+        }
+        self.done.push((level, machine));
+        true
+    }
+}
+
+static MACHINE_TICKS: Mutex<MachineTicks> = Mutex::new(MachineTicks::new());
+
+/// The port visits each machine ran in the last level tick, by master controller. The
+/// unit of the reviewer's finding is a (controller, port) visit, so the readout reports
+/// the ports one machine served in a tick: `ports` when it is on, `0` when it is off.
+struct MachineVisits {
+    counts: Vec<((LevelKey, [i32; 3]), u32)>,
+}
+
+impl MachineVisits {
+    const fn new() -> Self {
+        Self { counts: Vec::new() }
+    }
+
+    fn record(&mut self, level: LevelKey, machine: [i32; 3], visits: u32) {
+        let key = (level, machine);
+        match self.counts.iter_mut().find(|(slot, _)| *slot == key) {
+            Some((_, count)) => *count = visits,
+            None => self.counts.push((key, visits)),
+        }
+    }
+
+    fn of(&self, level: LevelKey, machine: [i32; 3]) -> u32 {
+        self.counts
+            .iter()
+            .find(|(slot, _)| *slot == (level, machine))
+            .map_or(0, |(_, count)| *count)
+    }
+}
+
+static MACHINE_VISITS: Mutex<MachineVisits> = Mutex::new(MachineVisits::new());
+
+/// Record the ports one machine served in this tick (a diagnostic the status line prints).
+fn record_visits(level: LevelKey, machine: [i32; 3], visits: u32) {
+    MACHINE_VISITS
+        .lock()
+        .expect("the machine visit lock is held for one write")
+        .record(level, machine, visits);
+}
+
+/// The ports `machine` served in the last tick since the last read.
+fn visits_of(level: LevelKey, machine: [i32; 3]) -> u32 {
+    MACHINE_VISITS
+        .lock()
+        .expect("the machine visit lock is held for one read")
+        .of(level, machine)
+}
+
+/// The per-port work one machine tick does, once for each of its ports.
+trait PortVisitor {
+    fn visit(&mut self, port: [i32; 3]);
+}
+
+/// One formed machine's port work for this tick.
+///
+/// The first controller of the machine to tick claims it, so N controllers cost
+/// `ports.len()` visits and not `N × ports.len()`. A switched-off machine visits
+/// nothing at all. Returns the ports visited.
+fn visit_machine_ports<V: PortVisitor>(
+    ticks: &mut MachineTicks,
+    level: LevelKey,
+    master: [i32; 3],
+    active: bool,
+    ports: &[[i32; 3]],
+    visitor: &mut V,
+) -> u32 {
+    if !active || !ticks.claim(level, master) {
+        return 0;
+    }
+    for port in ports {
+        visitor.visit(*port);
+    }
+    u32::try_from(ports.len()).unwrap_or(u32::MAX)
+}
+
 /// A proven formation and the region the proof depends on.
-#[derive(Clone)]
 struct Proven<T> {
-    answer: Result<T, String>,
+    answer: Answer<T>,
     /// The level the scan ran in, as `block_changed` names it.
     level: LevelKey,
     /// The block box the answer depends on, inclusive: the machine's own box when it
     /// formed, or the largest box a machine at that controller could occupy.
     min: [i32; 3],
     max: [i32; 3],
+}
+
+/// Cloning a proof copies two `Arc`s and a small box: never the machine's coordinates,
+/// whatever `T` is. (A derive would require `T: Clone` and deep-copy the record.)
+impl<T> Clone for Proven<T> {
+    fn clone(&self) -> Self {
+        Self {
+            answer: self.answer.clone(),
+            level: self.level,
+            min: self.min,
+            max: self.max,
+        }
+    }
 }
 
 impl<T> Proven<T> {
@@ -230,12 +353,14 @@ impl<K, T> Formations<K, T> {
     }
 }
 
-impl<K: std::hash::Hash + Eq, T: Clone> Formations<K, T> {
-    fn get(&self, key: &K) -> Option<&Result<T, String>> {
-        self.entries.get(key).map(|proven| &proven.answer)
+impl<K: std::hash::Hash + Eq, T> Formations<K, T> {
+    /// The answer a controller (or a port) already has, shared rather than copied.
+    fn get(&self, key: &K) -> Option<Answer<T>> {
+        self.entries.get(key).map(|proven| proven.answer.clone())
     }
 
     /// Record `proven` for every controller of the component it was scanned from.
+    /// Cloning the *proof* copies two `Arc`s, not the machine's coordinates.
     fn insert(&mut self, keys: impl IntoIterator<Item = K>, proven: &Proven<T>) {
         for key in keys {
             self.entries.insert(key, proven.clone());
@@ -261,18 +386,19 @@ fn change_affects(min: [i32; 3], max: [i32; 3], pos: [i32; 3], part_change: bool
     part_change && (0..3).all(|axis| min[axis] - 1 <= pos[axis] && pos[axis] <= max[axis] + 1)
 }
 
-/// A scanned answer with the box it depends on and every controller it answers for.
+/// A scanned answer with the box it depends on and every block it speaks for: every
+/// controller of the machine plus every port that answers through it.
 type Scanned<T> = (T, [i32; 3], [i32; 3], Vec<[i32; 3]>);
 
 /// The reactor formation at this controller, from the cache when the topology is
 /// unchanged. A fresh scan is charged to this tick's budget.
-fn cached_scan(host: &dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Result<Formed, String> {
+fn cached_scan(host: &dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Answer<Formed> {
     cached(&FORMED, host, level, pos, Budget::Tick, REACTOR_REACH, scan)
 }
 
 /// The same for a player's click, a command or a capability call: one scan, because
 /// it is a single user action rather than per-tick work.
-fn read_scan(host: &dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Result<Formed, String> {
+fn read_scan(host: &dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Answer<Formed> {
     cached(
         &FORMED,
         host,
@@ -289,7 +415,7 @@ fn energizer_cached_scan(
     host: &dyn ServerHost,
     level: LevelRef,
     pos: [i32; 3],
-) -> Result<EnergizerFormed, String> {
+) -> Answer<EnergizerFormed> {
     cached(
         &ENERGIZER_FORMED,
         host,
@@ -306,7 +432,7 @@ fn energizer_read_scan(
     host: &dyn ServerHost,
     level: LevelRef,
     pos: [i32; 3],
-) -> Result<EnergizerFormed, String> {
+) -> Answer<EnergizerFormed> {
     cached(
         &ENERGIZER_FORMED,
         host,
@@ -323,7 +449,7 @@ fn energizer_read_scan(
 ///
 /// `unformed_reach` is how far from the controller an unformed group may still reach:
 /// a failed scan has no box, so that region is what can make it form.
-fn cached<T: Clone>(
+fn cached<T>(
     cache: &Proofs<T>,
     host: &dyn ServerHost,
     level: LevelRef,
@@ -331,21 +457,21 @@ fn cached<T: Clone>(
     budget: Budget,
     unformed_reach: i32,
     scan: impl FnOnce(&dyn ServerHost, LevelRef, [i32; 3]) -> Result<Scanned<T>, String>,
-) -> Result<T, String> {
+) -> Answer<T> {
     let key = (level, pos);
     {
         let guard = cache
             .lock()
             .expect("the formation cache lock is held for one read");
         if let Some(hit) = guard.as_ref().and_then(|cache| cache.get(&key)) {
-            return hit.clone();
+            return hit;
         }
     }
     if !allow_scan(budget) {
-        return Err(UNPROVEN.to_owned());
+        return Err(Arc::from(UNPROVEN));
     }
-    let (answer, min, max, controllers) = match scan(host, level, pos) {
-        Ok((answer, min, max, controllers)) => (Ok(answer), min, max, controllers),
+    let (answer, min, max, mut keys) = match scan(host, level, pos) {
+        Ok((record, min, max, keys)) => (Ok(Arc::new(record)), min, max, keys),
         Err(reason) => {
             let low = [
                 pos[0] - unformed_reach,
@@ -357,14 +483,16 @@ fn cached<T: Clone>(
                 pos[1] + unformed_reach,
                 pos[2] + unformed_reach,
             ];
-            (Err(reason), low, high, vec![pos])
+            (Err(Arc::from(reason)), low, high, vec![pos])
         }
     };
-    if let Some(level_key) = level
-        .dimension()
-        .id(host)
-        .and_then(|id| LevelKey::parse(&id).ok())
-    {
+    if let Some(level_key) = level_key(host, level) {
+        // The block the scan was asked from answers for itself too: a port's
+        // capability call walks the machine once and is then a cache hit, like a
+        // controller's tick.
+        if !keys.contains(&pos) {
+            keys.push(pos);
+        }
         let proven = Proven {
             answer: answer.clone(),
             level: level_key,
@@ -375,14 +503,19 @@ fn cached<T: Clone>(
             .lock()
             .expect("the formation cache lock is held for one write")
             .get_or_insert_with(Formations::new)
-            .insert(
-                controllers.iter().map(|controller| (level, *controller)),
-                &proven,
-            );
+            .insert(keys.into_iter().map(|key| (level, key)), &proven);
     }
     // A level the game cannot name cannot be invalidated precisely; it is not cached,
     // so the next tick asks again rather than trusting a proof nothing drops.
     answer
+}
+
+/// The level's key, as `block_changed` names it.
+fn level_key(host: &dyn ServerHost, level: LevelRef) -> Option<LevelKey> {
+    level
+        .dimension()
+        .id(host)
+        .and_then(|id| LevelKey::parse(&id).ok())
 }
 
 /// Drop the proofs one level's committed block change can make wrong.
@@ -420,8 +553,11 @@ fn scan_energizer(
     let design = EnergizerDesign::try_new(size, shape.parts, shape.cells)
         .map_err(|error| error.to_string())?;
     let (min, max) = (shape.min, shape.max);
-    let controllers = shape.controllers.clone();
-    Ok((EnergizerFormed { design, shape }, min, max, controllers))
+    // Every controller of the box and every port it answers through: one scan is the
+    // whole machine, so a port's capability call is a cache hit, not a scan.
+    let mut speaks_for = shape.controllers.clone();
+    speaks_for.extend_from_slice(&shape.ports);
+    Ok((EnergizerFormed { design, shape }, min, max, speaks_for))
 }
 
 /// The mod has no settings; the only state is the pending tap queue, which is per world.
@@ -572,9 +708,12 @@ impl Hooks for Mod {
                 }
                 Err(reason) => format!("The reactor did not form: {reason}"),
             },
-            ENERGIZER_CONTROLLER => match energizer_read_scan(host, level, pos) {
-                Ok(_) => {
-                    let Some(entity) = host.block_entity(level, pos) else {
+            ENERGIZER_CONTROLLER => match machine_at(host, level, pos) {
+                Ok(machine) => {
+                    // Every controller of a machine is the same control surface: the
+                    // state lives in the master, so a click on a second controller
+                    // switches the one machine.
+                    let Some(entity) = host.block_entity(level, machine.master) else {
                         return Flow::Continue;
                     };
                     let mut energizer = energizer_state(&entity.data(host).unwrap_or_default());
@@ -631,13 +770,18 @@ impl Hooks for Mod {
             .lock()
             .expect("the formation cache lock is held for one clear")
             .take();
+        MACHINE_TICKS
+            .lock()
+            .expect("the machine tick lock is held for one clear")
+            .begin();
         SCAN_BUDGET
             .lock()
             .expect("the scan budget lock is held for one reset")
             .reset();
     }
 
-    /// Before a level's tick: a new tick starts with the full scan share.
+    /// Before a level's tick: a new tick starts with the full scan share, and no machine
+    /// has had its ports visited yet.
     fn level_tick_pre(&self, host: HostSide, _event: &mut LevelTickPreEvent) {
         let HostSide::Server(_host) = host else {
             return;
@@ -646,6 +790,10 @@ impl Hooks for Mod {
             .lock()
             .expect("the scan budget lock is held for one refill")
             .begin_tick();
+        MACHINE_TICKS
+            .lock()
+            .expect("the machine tick lock is held for one tick")
+            .begin();
     }
 
     /// After a level's tick: every queued tap pushes its FE into the blocks beside it. A tap is
@@ -740,7 +888,13 @@ impl BlockEntityPart for ControllerPart {
             reactor.energy = f64::from(capacity);
         }
         for port in &formed.shape.ports {
-            let ingots = take_fuel(host, level, *port);
+            // Take only the ingots the tank has room for; the rest stays in the port's
+            // slot (upstream's own defect: it cleared the whole stack).
+            let room = reactor.ingots_that_fit(&formed.design);
+            if room <= 0 {
+                break;
+            }
+            let ingots = take_fuel(host, level, *port, room);
             if ingots > 0 {
                 reactor.insert_ingots(&formed.design, ingots);
             }
@@ -857,47 +1011,70 @@ impl BlockEntityPart for EnergizerPortPart {
 }
 
 /// One server tick of a formed energizer.
+///
+/// The machine's state (on/off and the buffer) lives in its master controller; a shell
+/// made of several controllers therefore costs one tick's work, not one per controller,
+/// and its ports are visited once for the machine — never while it is off.
 fn energizer_tick(host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
     let Some(level) = in_place_level(host) else {
         return;
     };
     let pos = event.pos;
     let Ok(formed) = energizer_cached_scan(host, level, pos) else {
-        // A port must stop answering the capability the moment its machine is no longer whole.
-        write_bool(&mut event.entity.nbt, "formed", false);
         return;
     };
+    let Some(master) = formed.shape.master_controller() else {
+        return;
+    };
+    let Some(key) = level_key(host, level) else {
+        return;
+    };
+    if pos != master {
+        // Another controller of the same machine owns the tick; this one is not a
+        // second machine, so it runs nothing.
+        return;
+    }
     let capacity = formed.design.capacity();
     let mut energizer = energizer_state(&event.entity.nbt);
     if energizer.energy > capacity {
         energizer.energy = capacity;
     }
-    for port in &formed.shape.ports {
-        announce_port(host, level, *port, pos);
-        push_from_port(host, level, *port, &mut energizer);
-    }
     store_energizer(&mut event.entity.nbt, &energizer);
-    write_bool(&mut event.entity.nbt, "formed", true);
-    write_u64(&mut event.entity.nbt, "capacity", capacity);
+    let active = energizer.active;
+    let visits = {
+        let mut ticks = MACHINE_TICKS
+            .lock()
+            .expect("the machine tick lock is held for one machine");
+        let mut push = PushToNeighbours {
+            host,
+            level,
+            energizer: &mut energizer,
+        };
+        visit_machine_ports(
+            &mut ticks,
+            key,
+            master,
+            active,
+            &formed.shape.ports,
+            &mut push,
+        )
+    };
+    record_visits(key, master, visits);
+    store_energizer(&mut event.entity.nbt, &energizer);
 }
 
-/// Tell a port which controller it belongs to, so its capability can reach the buffer.
-fn announce_port(host: &mut dyn ServerHost, level: LevelRef, port: [i32; 3], controller: [i32; 3]) {
-    let Some(entity) = host.block_entity(level, port) else {
-        return;
-    };
-    let data = entity.data(host).unwrap_or_default();
-    if read_int(&data, "cx") == controller[0]
-        && read_int(&data, "cy") == controller[1]
-        && read_int(&data, "cz") == controller[2]
-    {
-        return;
+/// The machine's own per-port work: an output port pushes the buffer into the first
+/// neighbour that takes it.
+struct PushToNeighbours<'a> {
+    host: &'a mut dyn ServerHost,
+    level: LevelRef,
+    energizer: &'a mut Energizer,
+}
+
+impl PortVisitor for PushToNeighbours<'_> {
+    fn visit(&mut self, port: [i32; 3]) {
+        push_from_port(self.host, self.level, port, self.energizer);
     }
-    let mut patch = Compound::new();
-    write_int(&mut patch, "cx", controller[0]);
-    write_int(&mut patch, "cy", controller[1]);
-    write_int(&mut patch, "cz", controller[2]);
-    let _ = entity.merge_data(host, patch);
 }
 
 /// An output port pushes the machine's FE into the first neighbour that takes it. Upstream
@@ -958,9 +1135,9 @@ fn push_from_port(
     }
 }
 
-/// The energizer's energy face: a view of the controller's buffer, as upstream's passive
-/// power port is. `iodir` gates it (input accepts, output gives) and `formed` + `active` gate
-/// it too, so an unformed or switched-off machine refuses both ways.
+/// The energizer's energy face: a view of the machine's buffer, as upstream's passive
+/// power port is. `iodir` gates it (input accepts, output gives) and the machine's own
+/// `active` flag gates it too, so a switched-off machine refuses both ways.
 struct PortEnergy {
     at: BlockSide,
 }
@@ -971,35 +1148,58 @@ impl PortEnergy {
             .and_then(|entity| entity.data(host))
             .map_or(IoDirection::Input, |data| read_direction(&data))
     }
+
+    /// The machine this port is part of *now*, with its master controller's saved
+    /// compound. `None` when the port is not in a current formation.
+    fn machine(&self, host: &mut dyn ServerHost) -> Option<(Machine, Compound)> {
+        let machine = machine_at(host, self.at.level, self.at.pos).ok()?;
+        let entity = host.block_entity(self.at.level, machine.master)?;
+        let data = entity.data(host)?;
+        Some((machine, data))
+    }
 }
 
 impl EnergyHandler for PortEnergy {
     fn amount(&self, host: &mut dyn ServerHost) -> u32 {
-        let Some((_, data)) = port_controller(host, self.at.level, self.at.pos) else {
+        let Some((_, data)) = self.machine(host) else {
             return 0;
         };
-        u32::try_from(energizer_state(&data).energy).unwrap_or(u32::MAX)
+        let energizer = energizer_state(&data);
+        if !energizer.active {
+            return 0;
+        }
+        u32::try_from(energizer.energy).unwrap_or(u32::MAX)
     }
 
     fn capacity(&self, host: &mut dyn ServerHost) -> u32 {
-        let Some((_, data)) = port_controller(host, self.at.level, self.at.pos) else {
+        let Some((machine, data)) = self.machine(host) else {
             return 0;
         };
-        u32::try_from(read_u64(&data, "capacity")).unwrap_or(u32::MAX)
+        if !energizer_state(&data).active {
+            return 0;
+        }
+        u32::try_from(machine.formed.design.capacity()).unwrap_or(u32::MAX)
     }
 
     fn insert(&self, host: &mut dyn ServerHost, _tx: &Transaction, amount: u32) -> u32 {
         if amount == 0 || self.direction(host) != IoDirection::Input {
             return 0;
         }
-        let Some((controller, data)) = port_controller(host, self.at.level, self.at.pos) else {
+        let Some((machine, data)) = self.machine(host) else {
             return 0;
         };
         let mut energizer = energizer_state(&data);
-        let taken = energizer.insert_within(read_u64(&data, "capacity"), u64::from(amount));
+        if !energizer.active {
+            return 0;
+        }
+        let taken = energizer.insert_within(machine.formed.design.capacity(), u64::from(amount));
         if taken == 0 {
             return 0;
         }
+        let controller = host.block_entity(self.at.level, machine.master);
+        let Some(controller) = controller else {
+            return 0;
+        };
         let mut patch = Compound::new();
         write_u64(&mut patch, "energy", energizer.energy);
         if controller.merge_data(host, patch).is_err() {
@@ -1012,14 +1212,21 @@ impl EnergyHandler for PortEnergy {
         if amount == 0 || self.direction(host) != IoDirection::Output {
             return 0;
         }
-        let Some((controller, data)) = port_controller(host, self.at.level, self.at.pos) else {
+        let Some((machine, data)) = self.machine(host) else {
             return 0;
         };
         let mut energizer = energizer_state(&data);
+        if !energizer.active {
+            return 0;
+        }
         let given = energizer.extract_within(u64::from(amount));
         if given == 0 {
             return 0;
         }
+        let controller = host.block_entity(self.at.level, machine.master);
+        let Some(controller) = controller else {
+            return 0;
+        };
         let mut patch = Compound::new();
         write_u64(&mut patch, "energy", energizer.energy);
         if controller.merge_data(host, patch).is_err() {
@@ -1092,28 +1299,37 @@ impl EnergyHandler for ReactorInput {
     }
 }
 
-/// The controller a formed energizer's port belongs to, with its saved compound.
-fn port_controller(
-    host: &dyn ServerHost,
-    level: LevelRef,
-    pos: [i32; 3],
-) -> Option<(BlockEntityRef, Compound)> {
-    let port = host.block_entity(level, pos)?;
-    let data = port.data(host)?;
-    let controller = [
-        read_int(&data, "cx"),
-        read_int(&data, "cy"),
-        read_int(&data, "cz"),
-    ];
-    if block_at(host, level, controller).as_deref() != Some(ENERGIZER_CONTROLLER) {
-        return None;
+/// A machine, as the current formation proves it: the shared record and the master
+/// controller whose saved compound holds its state.
+struct Machine {
+    formed: Arc<EnergizerFormed>,
+    master: [i32; 3],
+}
+
+/// The machine whose *current* formation contains `pos`.
+///
+/// This is the reviewer's finding (3): a port used to answer from the controller
+/// coordinates it remembered plus the controller's `formed` bit, so after a machine was
+/// rebuilt smaller around that same controller a detached port still reached the energy
+/// buffer. Membership is the formation the world is in now: a port the current shape
+/// does not list belongs to no machine and answers 0 capacity and 0 accepted.
+fn machine_at(host: &dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Result<Machine, Arc<str>> {
+    let formed = energizer_read_scan(host, level, pos)?;
+    if !in_formation(&formed.shape, pos) {
+        return Err(Arc::from("this block is not part of a formed energizer"));
     }
-    let entity = host.block_entity(level, controller)?;
-    let data = entity.data(host)?;
-    if !read_bool(&data, "formed") {
-        return None;
-    }
-    Some((entity, data))
+    let master = formed
+        .shape
+        .master_controller()
+        .ok_or_else(|| Arc::from("the machine has no controller"))?;
+    Ok(Machine { formed, master })
+}
+
+/// Whether the current formation speaks for `pos`: it is one of the machine's
+/// controllers or one of its power ports. Nothing a port remembers about a controller it
+/// used to belong to is evidence.
+fn in_formation(shape: &EnergizerShape, pos: [i32; 3]) -> bool {
+    shape.controllers.contains(&pos) || shape.contains_port(pos)
 }
 
 // ---------------------------------------------------------------------------
@@ -1273,9 +1489,13 @@ fn store_reactor(nbt: &mut Compound, reactor: &Reactor) {
 // Fuel, FE and the world reads
 // ---------------------------------------------------------------------------
 
-/// `SolidAccessPort` + reactant mapping: one yellorium ingot is 1000 mB. Returns the ingots
-/// taken, which the reactor turns into fuel.
-fn take_fuel(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> i32 {
+/// `SolidAccessPort` + reactant mapping: one yellorium ingot is 1000 mB.
+///
+/// Takes at most `max_ingots` from the slot and leaves the rest there, so a stack larger
+/// than the tank's remaining room is not destroyed by the part that does not fit
+/// (upstream clears the whole stack). Returns the ingots taken, which the reactor turns
+/// into fuel.
+fn take_fuel(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3], max_ingots: i32) -> i32 {
     host.transaction(|host, tx| -> Result<i32, ()> {
         let Some(entity) = host.block_entity(level, pos) else {
             return Ok(0);
@@ -1286,14 +1506,19 @@ fn take_fuel(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> i32 {
         if stack.item().id(host) != YELLORIUM_INGOT {
             return Ok(0);
         }
-        let ingots = i32::try_from(stack.count()).unwrap_or(i32::MAX);
-        // The fuel is only consumed when the slot really lost it; an unchanged slot hands the
-        // reactor no fuel rather than making it from a failed write.
-        if !matches!(entity.set_item_slot(host, tx, 0, None), Ok(true)) {
+        let held = i32::try_from(stack.count()).unwrap_or(i32::MAX);
+        let take = held.min(max_ingots);
+        if take <= 0 {
+            return Ok(0);
+        }
+        let split = stack.split(u32::try_from(take).unwrap_or(u32::MAX));
+        // The fuel is only consumed when the slot really lost it; an unchanged slot hands
+        // the reactor no fuel rather than making it from a failed write.
+        if !matches!(entity.set_item_slot(host, tx, 0, split.remainder), Ok(true)) {
             return Ok(0);
         }
         let _ = entity.set_changed(host);
-        Ok(ingots)
+        Ok(take)
     })
     .unwrap_or(0)
 }
@@ -1457,44 +1682,65 @@ fn status_text(host: &mut dyn ServerHost, pos: [i32; 3]) -> String {
             time
         ),
         ENERGIZER_CONTROLLER => {
-            let energizer = energizer_state(&data);
-            let capacity = read_u64(&data, "capacity");
-            match energizer_read_scan(host, level, pos) {
-                Ok(formed) => format!(
-                    "Energizer at {},{},{}: formed {}x{}x{}, {} cells, {}/{} FE, active {}, t={}, scans={}",
+            match machine_at(host, level, pos) {
+                Ok(machine) => {
+                    // The machine's state lives in its master controller: a second
+                    // controller reports the same on/off and buffer.
+                    let data = host
+                        .block_entity(level, machine.master)
+                        .and_then(|entity| entity.data(host))
+                        .unwrap_or(data);
+                    let energizer = energizer_state(&data);
+                    let visits =
+                        level_key(host, level).map_or(0, |key| visits_of(key, machine.master));
+                    format!(
+                        "Energizer at {},{},{}: formed {}x{}x{}, {} cells, {}/{} FE, active {}, t={}, scans={}, visits={}",
+                        pos[0],
+                        pos[1],
+                        pos[2],
+                        machine.formed.shape.max[0] - machine.formed.shape.min[0] + 1,
+                        machine.formed.shape.max[1] - machine.formed.shape.min[1] + 1,
+                        machine.formed.shape.max[2] - machine.formed.shape.min[2] + 1,
+                        machine.formed.design.cells,
+                        energizer.energy,
+                        machine.formed.design.capacity(),
+                        energizer.active,
+                        time,
+                        scans,
+                        visits
+                    )
+                }
+                Err(reason) => format!(
+                    "Energizer at {},{},{}: not formed ({reason}), active {}, t={}, scans={}, visits=0",
                     pos[0],
                     pos[1],
                     pos[2],
-                    formed.shape.max[0] - formed.shape.min[0] + 1,
-                    formed.shape.max[1] - formed.shape.min[1] + 1,
-                    formed.shape.max[2] - formed.shape.min[2] + 1,
-                    formed.design.cells,
-                    energizer.energy,
-                    capacity,
-                    energizer.active,
+                    energizer_state(&data).active,
                     time,
                     scans
-                ),
-                Err(reason) => format!(
-                    "Energizer at {},{},{}: not formed ({reason}), active {}, t={}, scans={}",
-                    pos[0], pos[1], pos[2], energizer.active, time, scans
                 ),
             }
         }
         ENERGIZER_PORT => {
             let direction = read_direction(&data);
-            match port_controller(host, level, pos) {
-                Some((_, controller)) => format!(
-                    "Energizer Power Port at {},{},{}: {}, {}/{} FE, t={}",
-                    pos[0],
-                    pos[1],
-                    pos[2],
-                    direction,
-                    energizer_state(&controller).energy,
-                    read_u64(&controller, "capacity"),
-                    time
-                ),
-                None => format!(
+            match machine_at(host, level, pos) {
+                Ok(machine) => {
+                    let controller = host
+                        .block_entity(level, machine.master)
+                        .and_then(|entity| entity.data(host))
+                        .unwrap_or_default();
+                    format!(
+                        "Energizer Power Port at {},{},{}: {}, {}/{} FE, t={}",
+                        pos[0],
+                        pos[1],
+                        pos[2],
+                        direction,
+                        energizer_state(&controller).energy,
+                        machine.formed.design.capacity(),
+                        time
+                    )
+                }
+                Err(_) => format!(
                     "Energizer Power Port at {},{},{}: not formed, {}, t={}",
                     pos[0], pos[1], pos[2], direction, time
                 ),
@@ -1630,15 +1876,26 @@ mod tests {
         // inside its box drops it, so the next tick re-scans.
         let mut cache: Formations<u8, &'static str> = Formations::new();
         cache.insert([1], &proven_formation(Ok("formed")));
-        assert_eq!(cache.get(&1).cloned(), Some(Ok("formed")));
+        assert_eq!(cached_answer(&cache, 1), Some(Ok("formed")));
         cache.invalidate(LevelKey::OVERWORLD, [11, 21, 31], false);
-        assert_eq!(cache.get(&1).cloned(), None);
+        assert_eq!(cached_answer(&cache, 1), None);
+    }
+
+    /// The answer a cache holds for `key`, as a plain value: `None` when the proof was
+    /// dropped, `Some(Ok(_))` when it formed, `Some(Err(()))` when it did not.
+    fn cached_answer(
+        cache: &Formations<u8, &'static str>,
+        key: u8,
+    ) -> Option<Result<&'static str, ()>> {
+        cache
+            .get(&key)
+            .map(|answer| answer.map(|shared| *shared).map_err(|_| ()))
     }
 
     /// A proof of a machine whose box is `[10,20,30]..=[12,22,32]`.
-    fn proven_formation(answer: Result<&'static str, String>) -> Proven<&'static str> {
+    fn proven_formation(answer: Result<&'static str, &'static str>) -> Proven<&'static str> {
         Proven {
-            answer,
+            answer: answer.map(Arc::new).map_err(Arc::from),
             level: LevelKey::OVERWORLD,
             min: [10, 20, 30],
             max: [12, 22, 32],
@@ -1654,7 +1911,7 @@ mod tests {
         cache.insert([1], &proven_formation(Ok("formed")));
         cache.invalidate(LevelKey::OVERWORLD, [10, 20, 37], false);
         assert_eq!(
-            cache.get(&1).cloned(),
+            cached_answer(&cache, 1),
             Some(Ok("formed")),
             "an unrelated break dropped the proof and would force a rescan"
         );
@@ -1668,14 +1925,14 @@ mod tests {
         cache.insert([1], &proven_formation(Ok("formed")));
         cache.invalidate(LevelKey::OVERWORLD, [13, 21, 31], true);
         assert_eq!(
-            cache.get(&1).cloned(),
+            cached_answer(&cache, 1),
             None,
             "a part in the ring was ignored"
         );
         // A non-part in the same ring cannot join the component.
         cache.insert([1], &proven_formation(Ok("formed")));
         cache.invalidate(LevelKey::OVERWORLD, [13, 21, 31], false);
-        assert_eq!(cache.get(&1).cloned(), Some(Ok("formed")));
+        assert_eq!(cached_answer(&cache, 1), Some(Ok("formed")));
     }
 
     #[test]
@@ -1684,7 +1941,7 @@ mod tests {
         cache.insert([1], &proven_formation(Ok("formed")));
         cache.invalidate(LevelKey::NETHER, [11, 21, 31], false);
         assert_eq!(
-            cache.get(&1).cloned(),
+            cached_answer(&cache, 1),
             Some(Ok("formed")),
             "a Nether write dropped an Overworld proof"
         );
@@ -1694,9 +1951,9 @@ mod tests {
     fn one_scan_answers_every_controller_of_a_component() {
         let mut cache: Formations<u8, &'static str> = Formations::new();
         cache.insert([1, 2], &proven_formation(Ok("formed")));
-        assert_eq!(cache.get(&1).cloned(), Some(Ok("formed")));
+        assert_eq!(cached_answer(&cache, 1), Some(Ok("formed")));
         assert_eq!(
-            cache.get(&2).cloned(),
+            cached_answer(&cache, 2),
             Some(Ok("formed")),
             "the machine's second controller scanned again"
         );
@@ -1882,5 +2139,186 @@ mod tests {
         let energizer = energizer_state(&Compound::new());
         assert!(!energizer.active);
         assert_eq!(energizer.energy, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Review 2026-11-21 findings 1-3: one record, one visit, membership on access
+    // -----------------------------------------------------------------------
+
+    /// A machine record that counts its deep copies: the unit finding 1 is measured in.
+    #[derive(Default)]
+    struct Counted;
+
+    static COPIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    impl Counted {
+        fn copies() -> usize {
+            COPIES.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Clone for Counted {
+        fn clone(&self) -> Self {
+            COPIES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Self
+        }
+    }
+
+    /// Finding (1): `Formations::insert` deep-cloned the whole machine record for every
+    /// controller of the machine. A 32³ energizer's shell holds up to 5,768
+    /// controller/port blocks, so 0.2.4 kept 5,768 × 5,768 coordinates ≈ 381 MiB. One
+    /// machine is one record, shared by every controller that answers for it.
+    #[test]
+    fn a_machines_formation_is_stored_once_and_shared() {
+        COPIES.store(0, std::sync::atomic::Ordering::SeqCst);
+        let controllers = [[0, 1, 1], [1, 1, 1], [2, 1, 1], [0, 2, 2]];
+        let mut cache: Formations<[i32; 3], Counted> = Formations::new();
+        cache.insert(
+            controllers,
+            &Proven {
+                answer: Ok(Arc::new(Counted)),
+                level: LevelKey::OVERWORLD,
+                min: [0, 0, 0],
+                max: [2, 2, 2],
+            },
+        );
+        assert_eq!(
+            Counted::copies(),
+            0,
+            "the machine's record was deep-copied once per controller"
+        );
+
+        let first = cache.get(&controllers[0]).expect("the first controller");
+        for controller in &controllers[1..] {
+            let other = cache
+                .get(controller)
+                .expect("every controller of the machine has the proof");
+            match (&first, &other) {
+                (Ok(one), Ok(two)) => assert!(
+                    Arc::ptr_eq(one, two),
+                    "two controllers of one machine hold two copies of its shape"
+                ),
+                _ => panic!("the proof must be a formed machine"),
+            }
+        }
+    }
+
+    /// A machine's per-port worker that only counts, so the test measures visits and
+    /// never wall time.
+    #[derive(Default)]
+    struct CountingVisitor {
+        visited: usize,
+    }
+
+    impl PortVisitor for CountingVisitor {
+        fn visit(&mut self, _port: [i32; 3]) {
+            self.visited += 1;
+        }
+    }
+
+    /// Finding (2): every controller walked every port, so a controller/port split
+    /// multiplied the work (over 8 million visits per tick on a 32³ shell), and a
+    /// switched-off machine still walked its ports. The unit is a (controller, port)
+    /// visit: N controllers on one machine cost `ports`, not `N × ports`.
+    #[test]
+    fn a_machine_visits_its_ports_once_per_tick_however_many_controllers_it_has() {
+        let controllers = [[0, 1, 1], [1, 1, 1], [2, 1, 1], [0, 2, 2]];
+        let ports = [[2, 1, 1], [0, 0, 1]];
+        let master = [0, 1, 1];
+        let mut ticks = MachineTicks::new();
+        let mut visitor = CountingVisitor::default();
+
+        let visit_every_controller =
+            |ticks: &mut MachineTicks, active: bool, visitor: &mut CountingVisitor| {
+                controllers
+                    .iter()
+                    .map(|_| {
+                        visit_machine_ports(
+                            ticks,
+                            LevelKey::OVERWORLD,
+                            master,
+                            active,
+                            &ports,
+                            visitor,
+                        )
+                    })
+                    .sum::<u32>()
+            };
+
+        // One level tick: every controller of the machine ticks, as the game runs them.
+        ticks.begin();
+        assert_eq!(
+            visit_every_controller(&mut ticks, true, &mut visitor),
+            u32::try_from(ports.len()).unwrap(),
+            "N controllers must cost O(ports) visits, not O(N x ports)"
+        );
+        assert_eq!(
+            visitor.visited,
+            ports.len(),
+            "the ports were visited once each"
+        );
+
+        // The claim is per tick, not per machine: the next tick visits them again.
+        ticks.begin();
+        visitor.visited = 0;
+        assert_eq!(
+            visit_every_controller(&mut ticks, true, &mut visitor),
+            u32::try_from(ports.len()).unwrap()
+        );
+
+        // A switched-off machine walks nothing at all.
+        ticks.begin();
+        visitor.visited = 0;
+        assert_eq!(
+            visit_every_controller(&mut ticks, false, &mut visitor),
+            0,
+            "an off machine walked its ports"
+        );
+        assert_eq!(visitor.visited, 0);
+    }
+
+    /// A 5×5×5 energizer's shape, as the scan would report it.
+    fn five_cube() -> EnergizerShape {
+        EnergizerShape {
+            min: [0, 0, 0],
+            max: [4, 4, 4],
+            parts: 98,
+            cells: 27,
+            interior_volume: 27,
+            controllers: vec![[0, 2, 2]],
+            ports: vec![[4, 2, 2]],
+        }
+    }
+
+    /// Finding (3): the port answered from its saved controller coordinates plus the
+    /// controller's `formed` bit, so a port a smaller rebuild left outside still reached
+    /// the machine's buffer. Membership is the current formation.
+    #[test]
+    fn a_port_the_current_formation_does_not_list_is_not_a_member() {
+        let big = five_cube();
+        let old_port = [4, 2, 2];
+        assert!(in_formation(&big, old_port), "the 5x5x5 lists its port");
+        assert!(in_formation(&big, [0, 2, 2]), "and its controller");
+
+        // The same controller, rebuilt into a 3×3×3 with its own port: the old port is
+        // outside the new box and belongs to nothing.
+        let small = EnergizerShape {
+            min: [0, 0, 2],
+            max: [2, 2, 4],
+            parts: 26,
+            cells: 1,
+            interior_volume: 1,
+            controllers: vec![[0, 2, 2]],
+            ports: vec![[2, 2, 2]],
+        };
+        assert_eq!(small.master_controller(), big.master_controller());
+        assert!(
+            !in_formation(&small, old_port),
+            "a port the smaller rebuild left outside must not answer for it"
+        );
+        assert!(
+            in_formation(&small, [2, 2, 2]),
+            "the new port is a member of the current machine"
+        );
     }
 }

@@ -1,8 +1,61 @@
 # Verification
 
-Campaign pin: Horizon `1d63e0a5a37a7a708eb0b32b49bf0dfeb28ed8a9`,
-horizon-mixins `5a64af938ec86b00d53d16a408aabc0038fb3e57` (schema 6).
-Everything below was run at that pin; the logs named are the evidence.
+Campaign pin: Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`,
+horizon-mixins `e59da9094f0c2fdda6c627fe9eff22dec6a906f0` (api `0.2`, launcher 0.2.92).
+Everything below was run at that pin; the logs named are the evidence. Sections older than
+0.2.5 were run at the pins they name.
+
+## 0.2.5 — one record, one visit, membership on access (2026-11-21)
+
+Council review of PR #1501, four findings; each has a red proof already quoted in `notes.md`
+(the F1 test on the **delivered 0.2.4 sources**, the F2 test with 0.2.4's loop policy restored
+verbatim, and the G/H/I game phases against the **delivered 0.2.4 package**). This section is the
+ladder that followed.
+
+| step | command | result |
+|---|---|---|
+| repin | `[native] horizon = 0a875da…`, `rm -rf .horizon/sdk`, `cargo horizon-mod build` | `SDK 0a875da … in ./.horizon/sdk` |
+| baseline | `cargo test --offline` + the unchanged e2e | **56 passed**; `e2e-0a875da-baseline.log` **PASS + EXIT:0** |
+| tests | `cargo test --offline` | **62 passed, 0 failed** (`sdk-test.log`) |
+| clippy | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| fmt | `cargo fmt --check` | clean (`sdk-fmt.log`) |
+| build ×2 | `rm -f Cargo.lock && cargo horizon-mod build` twice | `cmp` byte-identical (`sdk-reproducible.txt`) |
+| check | `cargo horizon-mod check bigreactors.hmod` | `bigreactors 0.2.5 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **87,747 B**, EXIT 0 (`sdk-check.log`) |
+| fits (pin) | `cargo horizon-mod fits bigreactors.hmod --build 0a875da` | `0a875da  made for`, EXIT 0 (`sdk-fits.log`) |
+| fits (another) | `cargo horizon-mod fits bigreactors.hmod --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 (same log) |
+| gate | `python3 ports/tools/verify-sdk-package.py bigreactors` | **1/1** |
+| logs | `python3 ports/tools/check-e2e-logs.py bigreactors-e2e --strict` | `logs=10 ok=10 missing-exit=0 bad-exit=0` |
+
+Delivered artifact: `bigreactors.hmod` = `extreme_reactors.hmod`, **87,747 B**, SHA-256
+`0f5f3698be82cf9f13d745ac0c960d0fc92a152355d80b0825aa6f3e3ac920f2`, 107 entries, no `Cargo.lock`.
+
+In game (`ports/_shared/evidence/bigreactors-e2e/`, `--offscreen`):
+
+| log | leg | verdict |
+|---|---|---|
+| `e2e-launcher.log` | all earlier phases plus G (a 4-ingot stack into 3,000 mB of room leaves `yellorium_ingot x3`), H (5³ → 3³ around the same controller: old port `not formed`, buffer stays 0 for 200 ticks while the tap offers 15,470 FE, H2's tap then charges the new port 1,109 → 25,910), I (`visits=2` on, `visits=0` off) | **PASS + EXIT:0** |
+| `e2e-launcher-control.log` | the same Nightly **without** the package | **FAIL + EXIT:1** |
+| `e2e-launcher-selftest.log` | `SELFTEST=1` | **FAIL + EXIT:1** |
+| `e2e-launcher-negative.log` | `NEGATIVE=1` | **FAIL + EXIT:1** |
+| `e2e-launcher-peak-negative.log` | `PEAK_NEGATIVE=1` | **FAIL + EXIT:1** |
+| `e2e-024-red-f3-detached-port.log` | phase H on the **delivered 0.2.4 package** | **FAIL + EXIT:1** (the counterfactual) |
+| `e2e-024-red-f4-partial-fuel.log` | phase G on 0.2.4 | **FAIL + EXIT:1** |
+| `e2e-024-red-f2-visits.log` | phase I on 0.2.4 | **FAIL + EXIT:1** |
+| `e2e-0a875da-baseline.log` | the pre-fix tree at the new pin | **PASS + EXIT:0** |
+
+### Runner notes this slice cost
+
+- **A position's first `status` read must not abort the leg.** `status()`'s poll began with
+  `line=$(… | grep " at X,Y,Z:" | head -1)`; with `set -e` + `pipefail`, the *first* poll of a
+  position the chat window does not hold yet killed the leg silently (no `FAIL`, just `EXIT:1`).
+  Both greps are `|| true` now and the window is 30 messages, because every `setblock`/`fill`
+  adds a "Changed the block" chat line.
+- **Do not stand in the content grid.** Phase A leaves blocks at `(120..128, 101, 10)`; the H
+  phase's controller was first clicked from `(122.5,101,10.5)` — *inside* one of them — so
+  `look-at-block` failed. H clicks it from the east `(123.5,101,9.5)`.
+- **A detached port must survive the rebuild.** Filling the whole 5³ with air removed the very
+  port the finding is about; the fill now goes around `(118,102,6)`, so the block keeps whatever
+  its block entity remembers (which is what 0.2.4 trusted, and what the fix no longer reads).
 
 ## 0.2.4 — the tick budget covers capability scans (2026-11-20)
 

@@ -209,6 +209,15 @@ impl Reactor {
         self.insert_fuel(design, asked) / FUEL_PER_INGOT
     }
 
+    /// How many whole ingots the tank still has room for.
+    ///
+    /// An ingot is 1,000 mB, so a tank with 500 mB of room takes no ingot: the
+    /// port's stack stays in its slot instead of being destroyed by a partial take.
+    #[must_use]
+    pub fn ingots_that_fit(&self, design: &Design) -> i32 {
+        (design.fuel_capacity() - self.fuel).max(0) / FUEL_PER_INGOT
+    }
+
     /// Switches the reactor on or off; returns the new state.
     pub fn toggle(&mut self) -> bool {
         self.active = !self.active;
@@ -690,6 +699,29 @@ pub struct EnergizerShape {
     pub interior_volume: u32,
     pub controllers: Vec<[i32; 3]>,
     pub ports: Vec<[i32; 3]>,
+}
+
+impl EnergizerShape {
+    /// The controller the machine's tick runs on: the lowest coordinate of the box.
+    ///
+    /// A machine may have several controllers (the shell is made of them as readily
+    /// as of casing), and upstream gives the assembled multiblock exactly one master.
+    /// Choosing it by position makes that choice stable across reloads and makes one
+    /// scan answer every controller of the machine.
+    #[must_use]
+    pub fn master_controller(&self) -> Option<[i32; 3]> {
+        self.controllers.iter().copied().min()
+    }
+
+    /// Whether `pos` is a power port of *this* formation.
+    ///
+    /// A port speaks for the machine only while the machine's current shape contains
+    /// it: after a rebuild that leaves it outside, the saved controller coordinates
+    /// it remembers are not membership.
+    #[must_use]
+    pub fn contains_port(&self, pos: [i32; 3]) -> bool {
+        self.ports.contains(&pos)
+    }
 }
 
 /// A formed energizer's geometry: what the machine needs, nothing more.
@@ -1530,5 +1562,94 @@ mod tests {
         assert_eq!(IoDirection::Output.toggled(), IoDirection::Input);
         assert_eq!(IoDirection::Input.to_string(), "input");
         assert_eq!(IoDirection::Output.to_string(), "output");
+    }
+
+    // -----------------------------------------------------------------------
+    // Review 2026-11-21: one master per machine, membership on access, part fuel
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_machine_has_one_master_controller_by_position() {
+        let one = energizer_shape_of(&book_energizer()).expect("the book's energizer forms");
+        assert_eq!(one.master_controller(), Some([0, 1, 1]));
+
+        // A shell built out of several controllers: the lowest coordinate is the
+        // master, whatever order the scan found them in.
+        let mut cells = big_energizer();
+        cells.insert([0, 0, 0], EnergizerPart::Controller);
+        cells.insert([4, 4, 4], EnergizerPart::Controller);
+        cells.insert([4, 0, 4], EnergizerPart::Controller);
+        let many = energizer_shape_of(&cells).expect("a shell of controllers still forms");
+        assert_eq!(many.controllers.len(), 4);
+        assert_eq!(
+            many.master_controller(),
+            Some([0, 0, 0]),
+            "the master must be the lowest controller coordinate"
+        );
+    }
+
+    /// The reviewer's finding (3): a port answered from saved controller
+    /// coordinates plus a `formed` bit, so after a machine was rebuilt smaller the
+    /// detached port still reached the energy buffer. Membership is the current
+    /// formation's port list, and a smaller rebuild does not contain the old port.
+    #[test]
+    fn a_port_is_a_member_only_of_the_formation_that_contains_it() {
+        let big = energizer_shape_of(&big_energizer()).expect("the 5x5x5 forms");
+        let old_port = [4, 2, 2];
+        assert!(big.contains_port(old_port), "the 5x5x5 has its port");
+
+        // Rebuilt smaller around the same controller: the 3x3x3 corner at the
+        // controller (0, 2, 2), with its own port at (2, 2, 2).
+        let mut small = ECells::new();
+        for x in 0..=2 {
+            for y in 0..=2 {
+                for z in 2..=4 {
+                    small.insert([x, y, z], EnergizerPart::Casing);
+                }
+            }
+        }
+        small.insert([0, 2, 2], EnergizerPart::Controller);
+        small.insert([1, 1, 3], EnergizerPart::Cell);
+        small.insert([2, 2, 2], EnergizerPart::PowerPort);
+        let small = check_energizer_shape(move |pos| small.get(&pos).copied(), [0, 2, 2])
+            .expect("the smaller rebuild forms");
+        assert_eq!(small.master_controller(), big.master_controller());
+        assert!(
+            !small.contains_port(old_port),
+            "a port the smaller rebuild left outside must not answer for it"
+        );
+        assert!(small.contains_port([2, 2, 2]), "the new port answers");
+    }
+
+    /// The reviewer's finding (4): the tank took the whole stack even when only part
+    /// of it fit, and the rest was destroyed. A take is whole ingots only.
+    #[test]
+    fn the_tank_takes_only_the_whole_ingots_it_has_room_for() {
+        let design = first_reactor();
+        assert_eq!(design.fuel_capacity(), 4_000);
+        let mut reactor = Reactor::new();
+        assert_eq!(
+            reactor.ingots_that_fit(&design),
+            4,
+            "an empty 3x3x3 takes four ingots"
+        );
+        reactor.fuel = 3_000;
+        assert_eq!(
+            reactor.ingots_that_fit(&design),
+            1,
+            "1,000 mB of room is one ingot"
+        );
+        reactor.fuel = 3_500;
+        assert_eq!(
+            reactor.ingots_that_fit(&design),
+            0,
+            "500 mB is not a whole ingot, so none is taken"
+        );
+        reactor.fuel = 4_000;
+        assert_eq!(
+            reactor.ingots_that_fit(&design),
+            0,
+            "a full tank takes none"
+        );
     }
 }

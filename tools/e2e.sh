@@ -30,10 +30,17 @@
 #  E  energizer: a 3x3x3 forms with one cell and the jar's per-block capacity; it
 #     refuses FE while off; switched on, the reactor's tap charges it; its output
 #     port moves the FE into the reactor (a receive face); a 5x5x5 holds 27x;
-#     air interior and no controller do not form; switched off, it stops pushing.
+#     air interior and no controller do not form; switched off, it stops pushing;
+#     an unrelated break leaves its readout unchanged while a broken shell is
+#     re-proven and forms again when the casing is replaced.
+#  F  tick budget (0.2.4): one energizer serves two adjacent reactors; a tick that
+#     invalidates five machines runs at most the budgeted four fresh scans (the
+#     status readout's `scans=`); a status read outside a tick is still one free
+#     scan; every machine forms again when its casing is replaced.
 #
 # SELFTEST=1 flips the reactor's trajectory assertion; NEGATIVE=1 flips the
-# energizer's capacity assertion. Either must FAIL (EXIT:1), proving the leg can.
+# energizer's capacity assertion; PEAK_NEGATIVE=1 expects one fresh scan past the
+# budget. Each must FAIL (EXIT:1), proving the assertion can.
 set -Eeuo pipefail
 export LC_ALL=C
 
@@ -46,6 +53,7 @@ RES=${RES:-${HORIZON_RES:-/home/adlf/Desktop/horizon/.local/horizon-client/26.3}
 SOCK=${SOCK:-/tmp/opencode/bigreactors-e2e.sock}
 SELFTEST=${SELFTEST:-0}
 NEGATIVE=${NEGATIVE:-0}
+PEAK_NEGATIVE=${PEAK_NEGATIVE:-0}
 KEEP=${KEEP:-0}
 WORLD=BigReactorsE2E
 
@@ -73,6 +81,27 @@ EC_Y0=$Y0
 EC_Z0=0
 EC_CONTROLLER="$EC_X0 $((EC_Y0 + 1)) $((EC_Z0 + 2))"
 EC_PORT="$((EC_X0 + 4)) $((EC_Y0 + 1)) $((EC_Z0 + 2))"
+
+# Reactor B: a second reactor against the energizer's west face, so one energizer
+# tick asks two machines for their capacity (the reviewer's "multiple adjacent
+# machines").
+EB_X0=$((X0 - 3))
+EB_Z0=$((EA_Z0 - 2))
+EB_CONTROLLER="$((EB_X0 + 2)) $((Y0 + 1)) $((EB_Z0 + 2))"
+EB_PORT="$EB_X0 $((Y0 + 1)) $((EB_Z0 + 1))"
+EB_FUEL_ROD="$((EB_X0 + 1)) $((Y0 + 1)) $((EB_Z0 + 1))"
+EB_CONTROL_ROD="$((EB_X0 + 1)) $((Y0 + 2)) $((EB_Z0 + 1))"
+# The energizer's second output port, against reactor B's controller.
+EA_PORT_OUT2="$X0 $((Y0 + 1)) $EA_Z0"
+
+# The tick-budget row: five energizer+reactor units in a line, far from every other
+# machine, so one fill can invalidate all five reactors in a single tick.
+F2_Y0=$Y0
+F2_Z0=-18
+F2_X0=100
+F2_UNITS=5
+# Fresh formation scans one level tick may run (`SCANS_PER_TICK` in src/lib.rs).
+SCANS_PER_TICK=4
 
 # The content grid, the crafting table and the furnaces.
 CONTENT_Z=10
@@ -193,16 +222,55 @@ build_energizer5() { # X0 Y0 Z0
     ctl wait 4
 }
 
+# Right-click a block's face from a spot a player can stand in (the GUI button
+# upstream has): the face matters, because a controller between two machines is only
+# reachable from the side it does not share.
+click_from() { # PX PY PZ X Y Z FACE
+    end "tp @s $1 $2 $3" >/dev/null
+    ctl wait 5
+    ctl look-at-block $4 $5 $6 $7 >/dev/null
+    ctl interact $4 $5 $6 $7 >/dev/null || fail "the block at $4,$5,$6 did not take a right click on its $7 face"
+    ctl wait 5
+}
+
+# One tick-budget unit: a 3x3x3 reactor whose tap charges a 3x3x3 energizer behind it,
+# and that energizer's output port pushes back into the reactor's controller. The push
+# is the capability call whose capacity query this phase bounds.
+build_unit() { # X0 Y0 Z0  (the reactor spans X0..X0+2, Z0..Z0+2; the energizer Z0-3..Z0-1)
+    local x0=$1 y0=$2 z0=$3 y
+    for y in "$y0" $((y0 + 1)) $((y0 + 2)); do
+        fill_box "$x0" "$y" $((z0 - 3)) "$((x0 + 2))" "$y" $((z0 - 1)) bigreactors:energizercasing
+    done
+    place "$((x0 + 1))" "$((y0 + 1))" $((z0 - 2)) bigreactors:energizercell
+    place "$((x0 + 1))" "$((y0 + 1))" $((z0 - 3)) bigreactors:energizercontroller
+    # The ports sit on the shared face's two outer corners, so each machine's
+    # controller keeps a free side a player can click.
+    place "$((x0 + 2))" "$((y0 + 1))" $((z0 - 1)) bigreactors:energizerpowerportfe
+    place "$x0" "$((y0 + 1))" $((z0 - 1)) bigreactors:energizerpowerportfe
+    for y in "$y0" $((y0 + 1)) $((y0 + 2)); do
+        fill_box "$x0" "$y" "$z0" "$((x0 + 2))" "$y" $((z0 + 2)) bigreactors:basic_reactorcasing
+    done
+    place "$x0" "$((y0 + 1))" "$z0" bigreactors:basic_reactorcontroller
+    place "$((x0 + 2))" "$((y0 + 1))" "$z0" bigreactors:basic_reactorpowertapfe_active
+    place "$((x0 + 2))" "$((y0 + 1))" $((z0 + 1)) bigreactors:basic_reactorsolidaccessport
+    place "$((x0 + 1))" "$((y0 + 1))" $((z0 + 1)) bigreactors:basic_reactorfuelrod
+    place "$((x0 + 1))" $((y0 + 2)) $((z0 + 1)) bigreactors:basic_reactorcontrolrod
+    ctl wait 4
+}
+
 # status X Y Z: this block's status line, after a fresh reply arrives (the t=
 # field makes each reply unique).
+# status X Y Z: this block's status line, after a fresh reply arrives (the t=
+# field makes each reply unique). A poll whose window holds no line for the position
+# yet is a miss, not an error: the first read of a new position always starts there.
 status() { # status X Y Z
     local out line before
-    before=$(ctl messages 20 | jq -r '.chat[]' | grep -E " at $1,$2,$3:" | head -1)
+    before=$(ctl messages 30 | jq -r '.chat[]' | grep -E " at $1,$2,$3:" | head -1 || true)
     say "bigreactors status $1 $2 $3"
     for _ in $(seq 1 25); do
         ctl wait 4 >/dev/null
-        out=$(ctl messages 20)
-        line=$(jq -r '.chat[]' <<<"$out" | grep -E " at $1,$2,$3:|No reactor block" | head -1)
+        out=$(ctl messages 30)
+        line=$(jq -r '.chat[]' <<<"$out" | grep -E " at $1,$2,$3:|No reactor block" | head -1 || true)
         if [ -n "$line" ] && [ "$line" != "$before" ]; then
             echo "$line"
             return
@@ -219,6 +287,7 @@ waste_of() { sed -nE 's/.* waste ([0-9]+), heat .*/\1/p' <<<"$1"; }
 active_of() { sed -nE 's/.* active (true|false), t=.*/\1/p' <<<"$1"; }
 cells_of() { sed -nE 's/.* ([0-9]+) cells,.*/\1/p' <<<"$1"; }
 direction_of() { sed -nE 's/.*: (input|output), .*/\1/p' <<<"$1"; }
+scans_of() { sed -nE 's/.* scans=([0-9]+).*/\1/p' <<<"$1"; }
 
 expect_status() { # expect_status X Y Z SUBSTRING
     local line
@@ -244,6 +313,18 @@ face_reactor_controller() {
 
 launch
 arena
+
+# Phase filter. `PHASES="G" ONLY_NEW=1` runs only the 0.2.5 review phases (G/H/I): that
+# is how the red proof against the delivered 0.2.4 package was taken, and how a single
+# phase is re-run while fixing it. A normal leg runs every phase.
+want() {
+    case " ${PHASES:-G H I} " in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ "${ONLY_NEW:-0}" != 1 ]; then
 
 # ---------------------------------------------------------------------------
 # A. Content: every block and item, the unknown id, the tags
@@ -682,4 +763,396 @@ after=$(energy_of "$line")
 echo "  energizer: $before -> $after FE while it is off"
 [ "$after" = "$before" ] || fail "an off energizer kept pushing or charging: $line"
 
-echo "PASS: every carried block and item is give-able and place-able, an unknown id is refused, all nine shaped recipes craft with their declared id and count and consume their ingredients (two wrong-ingredient controls stay empty), the four graphite cooking recipes produce graphite, every block drops itself, the 3x3x3 reactor forms and holds the upstream 126.8 FE/t and 0.028 mB/t with a working tap and a receive face, and a 3x3x3 energizer forms at 683212743470724 FE, refuses FE while off, charges from the reactor's tap when on, pushes its FE into the reactor through its output port, scales to 27x at 5x5x5, and stops pushing when switched off"
+echo "== E8: an unrelated break leaves a formed energizer's readout unchanged =="
+# A committed block change used to drop every controller's scan, so every machine
+# re-walked its box on the next tick; the review finding. Now only the machines a
+# change can touch are re-proven. The readout is compared with its `t=` field
+# stripped, because the clock moves between the two reads.
+line=$(status $EA_CONTROLLER)
+echo "  before: $line"
+before_formation=$(sed -E 's/, t=[0-9]+, scans=[0-9]+, visits=[0-9]+$//' <<<"$line")
+# The floor two blocks north of the shell: outside the box and its one-block ring.
+end "setblock 100 100 -5 minecraft:air" >/dev/null
+ctl wait 20
+[ "$(block_name 100 100 -5)" = "minecraft:air" ] || fail "the unrelated block was not broken"
+line=$(status $EA_CONTROLLER)
+echo "  after an unrelated break: $line"
+after_formation=$(sed -E 's/, t=[0-9]+, scans=[0-9]+, visits=[0-9]+$//' <<<"$line")
+[ "$after_formation" = "$before_formation" ] \
+    || fail "an unrelated break changed the energizer's readout: '$before_formation' -> '$after_formation'"
+
+echo "== E8b: a break in the shell IS re-proven (the differential) =="
+# The same read after the top-face casing is broken must change: the machine is no
+# longer whole, so the readout above is not simply unable to change.
+end "setblock 101 103 -2 minecraft:air" >/dev/null
+ctl wait 20
+line=$(status $EA_CONTROLLER)
+echo "  after a shell break: $line"
+case "$line" in
+    *"not formed (the shell has a hole in it)"*) ;;
+    *) fail "a hole in the shell still read as formed: $line" ;;
+esac
+place 101 103 -2 bigreactors:energizercasing
+ctl wait 20
+line=$(status $EA_CONTROLLER)
+echo "  after the casing is replaced: $line"
+case "$line" in
+    *"formed 3x3x3, 1 cells"*) ;;
+    *) fail "the energizer did not form again after the casing was replaced: $line" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# F. The tick budget covers capability scans (0.2.4)
+# ---------------------------------------------------------------------------
+echo "== F1: one energizer serves two adjacent machines =="
+# Reactor B stands against the energizer's west face, with the energizer's second
+# output port between them. Both reactors are on, so the energizer's tick asks each
+# of them for its capacity: the reviewer's "multiple adjacent machines".
+y=
+for y in "$Y0" $((Y0 + 1)) $((Y0 + 2)); do
+    fill_box "$EB_X0" "$y" "$EB_Z0" "$((EB_X0 + 2))" "$y" $((EB_Z0 + 2)) bigreactors:basic_reactorcasing
+done
+place $EB_CONTROLLER bigreactors:basic_reactorcontroller
+place $EB_PORT bigreactors:basic_reactorsolidaccessport
+place $EB_FUEL_ROD bigreactors:basic_reactorfuelrod
+place $EB_CONTROL_ROD bigreactors:basic_reactorcontrolrod
+place $EA_PORT_OUT2 bigreactors:energizerpowerportfe
+ctl wait 6
+line=$(status $EB_CONTROLLER)
+echo "  $line"
+case "$line" in
+    *"formed 3x3x3, 1 fuel rods, 1 control rods"*) ;;
+    *) fail "reactor B did not form: $line" ;;
+esac
+ctl container $EB_PORT bigreactors:yellorium_ingot 4 >/dev/null
+ctl wait 8
+click_from 98.5 101 -1.5 $EB_CONTROLLER south
+line=$(status $EB_CONTROLLER)
+echo "  $line"
+[ "$(active_of "$line")" = true ] || fail "reactor B did not switch on: $line"
+# The second port becomes the machine's output and the first becomes its input, so
+# the energizer's FE can only leave through the port reactor B stands against. The
+# energizer stays off until both are set, so the window below starts from B's own
+# (empty) buffer.
+click_from 100.5 101 -5.5 $EA_PORT_OUT2 north
+ctl command "data get block $EA_PORT_OUT2" | jq -r '.chat[0]' | grep -q 'iodir: 1b' \
+    || fail "the energizer's second port did not switch to output"
+click_from 103.5 101 -1.5 102 102 -1 east
+ctl command "data get block 102 102 -1" | jq -r '.chat[0]' | grep -q 'iodir: 0b' \
+    || fail "the energizer's first port did not switch to input"
+line=$(status $EB_CONTROLLER)
+b0=$(energy_of "$line")
+echo "  before: reactor B $b0 FE"
+click_from 99.5 101 -1.5 $EA_CONTROLLER west
+line=$(status $EA_CONTROLLER)
+[ "$(active_of "$line")" = true ] || fail "the energizer did not switch on: $line"
+ctl wait 60
+line=$(status $EB_CONTROLLER)
+b1=$(energy_of "$line")
+echo "  after: reactor B $b0 -> $b1 FE"
+[ $((b1 - b0)) -gt 30000 ] \
+    || fail "the energizer pushed only $((b1 - b0)) FE into its second adjacent machine: $line"
+click_from 103.5 101 -1.5 102 102 -1 east
+ctl command "data get block 102 102 -1" | jq -r '.chat[0]' | grep -q 'iodir: 1b' \
+    || fail "the energizer's first port did not switch back to output"
+
+echo "== F2: a tick that invalidates more machines than the budget runs only the budget =="
+i=0
+while [ "$i" -lt "$F2_UNITS" ]; do
+    x=$((F2_X0 + 5 * i))
+    build_unit "$x" "$F2_Y0" "$F2_Z0"
+    ctl container "$((x + 2))" $((F2_Y0 + 1)) $((F2_Z0 + 1)) bigreactors:yellorium_ingot 4 >/dev/null
+    i=$((i + 1))
+done
+ctl wait 10
+# Every reactor on (it charges its energizer through the tap) and every energizer on.
+i=0
+while [ "$i" -lt "$F2_UNITS" ]; do
+    x=$((F2_X0 + 5 * i))
+    click_from "$((x - 1)).5" 101 $((F2_Z0 + 1)).5 "$x" $((F2_Y0 + 1)) "$F2_Z0" west
+    click_from "$((x + 1)).5" 101 $((F2_Z0 - 4)).5 "$((x + 1))" $((F2_Y0 + 1)) $((F2_Z0 - 3)) north
+    # The energizer's port into the reactor's controller becomes its output: that push
+    # is the capability call whose capacity query this phase bounds.
+    click_from "$((x - 1)).5" 101 $((F2_Z0 - 1)).5 "$x" $((F2_Y0 + 1)) $((F2_Z0 - 1)) west
+    ctl command "data get block $x $((F2_Y0 + 1)) $((F2_Z0 - 1))" | jq -r '.chat[0]' \
+        | grep -q 'iodir: 1b' || fail "unit $i: the energizer's output port did not switch"
+    i=$((i + 1))
+done
+ctl wait 200
+line=$(status "$F2_X0" $((F2_Y0 + 1)) "$F2_Z0")
+echo "  before the break: $line"
+case "$line" in
+    *"formed 3x3x3"*) ;;
+    *) fail "the first budget unit did not form: $line" ;;
+esac
+case "$(status "$((F2_X0 + 1))" $((F2_Y0 + 1)) $((F2_Z0 - 3)))" in
+    *"formed 3x3x3"*) ;;
+    *) fail "the first budget unit's energizer did not form" ;;
+esac
+# One command drops all five reactors' proofs in the same tick: a fill that only
+# replaces the mod's casing, so the gaps between the units stay air.
+end "fill $F2_X0 $((F2_Y0 + 2)) $((F2_Z0 + 1)) $((F2_X0 + 5 * F2_UNITS + 1)) $((F2_Y0 + 2)) $((F2_Z0 + 1)) minecraft:air replace bigreactors:basic_reactorcasing" >/dev/null
+ctl wait 8
+line=$(status "$F2_X0" $((F2_Y0 + 1)) "$F2_Z0")
+echo "  after the break: $line"
+scans=$(scans_of "$line")
+expected_scans=$SCANS_PER_TICK
+if [ "$PEAK_NEGATIVE" = 1 ]; then
+    echo "  PEAK_NEGATIVE: expecting one fresh scan past the budget (this must fail)"
+    expected_scans=$((SCANS_PER_TICK + 1))
+fi
+[ "$scans" = "$expected_scans" ] \
+    || fail "a tick with $F2_UNITS invalidated machines ran $scans fresh scans, not the budgeted $expected_scans: $line"
+
+echo "== F3: control - a status read outside a tick is still one free scan =="
+i=0
+while [ "$i" -lt "$F2_UNITS" ]; do
+    x=$((F2_X0 + 5 * i))
+    line=$(status "$x" $((F2_Y0 + 1)) "$F2_Z0")
+    echo "  unit $i: $line"
+    case "$line" in
+        *"waiting to be re-checked"*)
+            fail "a status read was refused by the tick budget: $line" ;;
+        *"not formed (the shell has a hole in it)"*) ;;
+        *) fail "unit $i read '$line', not the hole the break made" ;;
+    esac
+    i=$((i + 1))
+done
+
+echo "== F4: every unit forms again once its casing is replaced =="
+i=0
+while [ "$i" -lt "$F2_UNITS" ]; do
+    x=$((F2_X0 + 5 * i))
+    # The fill took the two top-face casings beside the control rod; both go back.
+    place "$x" $((F2_Y0 + 2)) $((F2_Z0 + 1)) bigreactors:basic_reactorcasing
+    place "$((x + 2))" $((F2_Y0 + 2)) $((F2_Z0 + 1)) bigreactors:basic_reactorcasing
+    i=$((i + 1))
+done
+ctl wait 40
+i=0
+while [ "$i" -lt "$F2_UNITS" ]; do
+    x=$((F2_X0 + 5 * i))
+    line=$(status "$x" $((F2_Y0 + 1)) "$F2_Z0")
+    echo "  unit $i: $line"
+    case "$line" in
+        *"formed 3x3x3"*) ;;
+        *) fail "unit $i did not recover after its casing was replaced: $line" ;;
+    esac
+    i=$((i + 1))
+done
+
+fi  # ONLY_NEW=0: phases A-F
+
+# ---------------------------------------------------------------------------
+# G. A stack larger than the tank's room keeps its remainder (0.2.5, finding 4)
+# ---------------------------------------------------------------------------
+if want G; then
+echo "== G: a 4-ingot stack into a tank with room for one keeps three in the port =="
+GX0=105
+GZ0=6
+G_CONTROLLER="$GX0 $((Y0 + 1)) $GZ0"
+G_PORT="$GX0 $((Y0 + 1)) $((GZ0 + 2))"
+fill_box "$GX0" "$Y0" "$GZ0" "$((GX0 + 2))" $((Y0 + 2)) "$((GZ0 + 2))" bigreactors:basic_reactorcasing
+place "$GX0" $((Y0 + 1)) "$GZ0" bigreactors:basic_reactorcontroller
+place "$GX0" $((Y0 + 1)) "$((GZ0 + 2))" bigreactors:basic_reactorsolidaccessport
+place "$((GX0 + 1))" $((Y0 + 1)) "$((GZ0 + 1))" bigreactors:basic_reactorfuelrod
+place "$((GX0 + 1))" $((Y0 + 2)) "$((GZ0 + 1))" bigreactors:basic_reactorcontrolrod
+ctl wait 6
+line=$(status $G_CONTROLLER)
+echo "  $line"
+case "$line" in
+    *"formed 3x3x3, 1 fuel rods, 1 control rods"*) ;;
+    *) fail "the phase-G reactor did not form: $line" ;;
+esac
+# Three ingots fill 3,000 of the tank's 4,000 mB. The reactor stays off, so nothing burns.
+end "tp @s 104.5 101 7.5" >/dev/null
+ctl wait 4
+ctl container $G_PORT bigreactors:yellorium_ingot 3 >/dev/null
+ctl wait 10
+line=$(status $G_CONTROLLER)
+echo "  after three ingots: $line"
+[ "$(fuel_of "$line")" = 3000 ] || fail "the tank did not take the first three ingots: $line"
+# A stack of four now finds room for one: the other three must stay in the slot.
+ctl container $G_PORT bigreactors:yellorium_ingot 4 >/dev/null
+ctl wait 10
+line=$(status $G_CONTROLLER)
+echo "  after a four-ingot stack: $line"
+[ "$(fuel_of "$line")" = 4000 ] || fail "the tank did not stop at its 4,000 mB: $line"
+port_line=$(status $G_PORT)
+echo "  $port_line"
+case "$port_line" in
+    *"bigreactors:yellorium_ingot x3"*) ;;
+    *) fail "the access port reads '$port_line', not the three ingots the tank had no room for" ;;
+esac
+echo "  one ingot of four went into the tank; three stayed in the slot"
+fi
+
+# ---------------------------------------------------------------------------
+# H. A rebuilt-smaller machine leaves its old port inert (0.2.5, finding 3)
+# ---------------------------------------------------------------------------
+if want H; then
+echo "== H: rebuild a 5x5x5 energizer smaller around its controller =="
+# Reactor H1 charges the energizer through the OLD port: its tap is against (118,102,6).
+H1X0=115
+H1Z0=6
+H1_CONTROLLER="$H1X0 $((Y0 + 1)) $H1Z0"
+H1_PORT="$H1X0 $((Y0 + 1)) $((H1Z0 + 2))"
+H1_TAP="$((H1X0 + 2)) $((Y0 + 1)) $H1Z0"
+HX0=118
+HZ0=5
+H_CONTROLLER="$((HX0 + 4)) $Y0 $((HZ0 + 4))"
+H_OLD_PORT="$HX0 $((Y0 + 1)) $((HZ0 + 1))"
+H_NEW_PORT="$((HX0 + 4)) $((Y0 + 1)) $((HZ0 + 2))"
+fill_box "$H1X0" "$Y0" "$H1Z0" "$((H1X0 + 2))" $((Y0 + 2)) "$((H1Z0 + 2))" bigreactors:basic_reactorcasing
+place "$H1X0" $((Y0 + 1)) "$H1Z0" bigreactors:basic_reactorcontroller
+place "$H1X0" $((Y0 + 1)) "$((H1Z0 + 2))" bigreactors:basic_reactorsolidaccessport
+place $H1_TAP bigreactors:basic_reactorpowertapfe_active
+place "$((H1X0 + 1))" $((Y0 + 1)) "$((H1Z0 + 1))" bigreactors:basic_reactorfuelrod
+place "$((H1X0 + 1))" $((Y0 + 2)) "$((H1Z0 + 1))" bigreactors:basic_reactorcontrolrod
+build_energizer5 "$HX0" "$Y0" "$HZ0"
+place $H_CONTROLLER bigreactors:energizercontroller
+place $H_OLD_PORT bigreactors:energizerpowerportfe
+place $H_NEW_PORT bigreactors:energizerpowerportfe
+ctl wait 8
+line=$(status $H_CONTROLLER)
+echo "  $line"
+case "$line" in
+    *"formed 5x5x5, 27 cells"*) ;;
+    *) fail "the 5x5x5 energizer did not form: $line" ;;
+esac
+case "$(status $H_OLD_PORT)" in
+    *"not formed"*) fail "the old port is not a member of the 5x5x5" ;;
+esac
+# Both machines on; H1 is fuelled so its tap has FE to give the energizer.
+click_from 114.5 101 7.5 $H1_CONTROLLER west
+ctl container $H1_PORT bigreactors:yellorium_ingot 4 >/dev/null
+# East of the controller's east face: the spot south of it holds a content-grid block.
+click_from 123.5 101 9.5 $H_CONTROLLER east
+line=$(status $H_CONTROLLER)
+[ "$(active_of "$line")" = true ] || fail "the 5x5x5 energizer did not switch on: $line"
+ctl wait 200
+line=$(status $H_CONTROLLER)
+filled=$(energy_of "$line")
+echo "  before the rebuild: $line"
+[ "$filled" -gt 0 ] || fail "H1's tap did not charge the machine through the old port: $line"
+
+echo "  -- rebuild the same controller into a 3x3x3: (118..122,101..105,5..9) -> (120..122,101..103,7..9)"
+# The old port (118,102,6) is deliberately NOT broken: it is the block the player left
+# standing outside the smaller box, with whatever it remembers about the machine.
+fill_box "$HX0" $((Y0 + 2)) "$HZ0" "$HX0" $((Y0 + 4)) "$((HZ0 + 4))" minecraft:air
+fill_box "$HX0" "$Y0" "$HZ0" "$HX0" "$Y0" "$((HZ0 + 4))" minecraft:air
+fill_box "$HX0" $((Y0 + 1)) "$HZ0" "$HX0" $((Y0 + 1)) "$HZ0" minecraft:air
+fill_box "$HX0" $((Y0 + 1)) "$((HZ0 + 2))" "$HX0" $((Y0 + 1)) "$((HZ0 + 4))" minecraft:air
+fill_box "$((HX0 + 1))" "$Y0" "$HZ0" "$((HX0 + 4))" $((Y0 + 4)) "$((HZ0 + 4))" minecraft:air
+for y in "$Y0" $((Y0 + 1)) $((Y0 + 2)); do
+    fill_box "$((HX0 + 2))" "$y" "$((HZ0 + 2))" "$((HX0 + 4))" "$y" "$((HZ0 + 4))" bigreactors:energizercasing
+done
+place "$((HX0 + 3))" $((Y0 + 1)) "$((HZ0 + 3))" bigreactors:energizercell
+place $H_CONTROLLER bigreactors:energizercontroller
+place $H_NEW_PORT bigreactors:energizerpowerportfe
+ctl wait 12
+[ "$(block_name "$HX0" $((Y0 + 1)) $((HZ0 + 1)))" = bigreactors:energizerpowerportfe ] \
+    || fail "the old port did not survive the rebuild"
+line=$(status $H_CONTROLLER)
+echo "  $line"
+case "$line" in
+    *"formed 3x3x3, 1 cells"*) ;;
+    *) fail "the smaller rebuild did not form: $line" ;;
+esac
+new_port_line=$(status $H_NEW_PORT)
+echo "  new port: $new_port_line"
+case "$new_port_line" in
+    *"not formed"*) fail "the new port is not a member of the smaller machine: $new_port_line" ;;
+esac
+old_port_line=$(status $H_OLD_PORT)
+echo "  old port: $old_port_line"
+case "$old_port_line" in
+    *"not formed"*) ;;
+    *) fail "the detached old port still answers for the machine: $old_port_line" ;;
+esac
+# The rebuilt machine is fresh, so its buffer starts empty. Its old port is still beside
+# H1's tap, which is full and offers its FE into that very block every level tick; if the
+# port still reached the machine the buffer could not stay at zero.
+# East of the controller's east face: the spot south of it holds a content-grid block.
+click_from 123.5 101 9.5 $H_CONTROLLER east
+line=$(status $H_CONTROLLER)
+[ "$(active_of "$line")" = true ] || fail "the rebuilt energizer did not switch on: $line"
+e0=$(energy_of "$line")
+tap_line=$(status $H1_TAP)
+tap_energy=$(energy_of "$tap_line" || echo 0)
+echo "  before the wait: energizer $e0 FE, H1's tap $tap_energy FE ($tap_line)"
+[ "$(active_of "$(status $H1_CONTROLLER)")" = true ] \
+    || fail "H1 switched itself off, so the detached-port control is vacuous"
+[ "$tap_energy" -gt 0 ] || fail "H1's tap has no FE, so the detached-port control is vacuous"
+ctl wait 200
+e1=$(energy_of "$(status $H_CONTROLLER)")
+echo "  after 200 ticks: energizer $e0 -> $e1 FE while the tap offers its buffer to the old port"
+[ "$e1" = "$e0" ] \
+    || fail "the detached old port still charged the machine ($e0 -> $e1 FE)"
+[ "$e1" = 0 ] || fail "an uncharged rebuilt machine holds $e1 FE"
+
+echo "  -- the new port still works: reactor H2's tap stands against it"
+H2X0=123
+H2Z0=5
+H2_CONTROLLER="$((H2X0 + 2)) $((Y0 + 1)) $H2Z0"
+H2_TAP="$H2X0 $((Y0 + 1)) $((H2Z0 + 2))"
+H2_PORT="$((H2X0 + 2)) $((Y0 + 1)) $((H2Z0 + 1))"
+fill_box "$H2X0" "$Y0" "$H2Z0" "$((H2X0 + 2))" $((Y0 + 2)) "$((H2Z0 + 2))" bigreactors:basic_reactorcasing
+place $H2_CONTROLLER bigreactors:basic_reactorcontroller
+place $H2_PORT bigreactors:basic_reactorsolidaccessport
+place $H2_TAP bigreactors:basic_reactorpowertapfe_active
+place "$((H2X0 + 1))" $((Y0 + 1)) "$((H2Z0 + 1))" bigreactors:basic_reactorfuelrod
+place "$((H2X0 + 1))" $((Y0 + 2)) "$((H2Z0 + 1))" bigreactors:basic_reactorcontrolrod
+ctl wait 8
+click_from 126.5 101 6.5 $H2_PORT east
+ctl container $H2_PORT bigreactors:yellorium_ingot 4 >/dev/null
+click_from 126.5 101 5.5 $H2_CONTROLLER east
+line=$(status $H2_CONTROLLER)
+[ "$(active_of "$line")" = true ] || fail "reactor H2 did not switch on: $line"
+e2=$(energy_of "$(status $H_CONTROLLER)")
+ctl wait 200
+e3=$(energy_of "$(status $H_CONTROLLER)")
+echo "  after H2's tap: energizer $e2 -> $e3 FE through the new port"
+[ "$e3" -gt "$e2" ] || fail "the new port did not accept FE from H2's tap ($e2 -> $e3 FE)"
+fi
+
+# ---------------------------------------------------------------------------
+# I. Ports are visited once per machine per tick (0.2.5, finding 2)
+# ---------------------------------------------------------------------------
+if want I; then
+echo "== I: two controllers and two ports cost two visits a tick, and none while off =="
+IX0=129
+IZ0=5
+I_CONTROLLER="$((IX0 + 2)) $((Y0 + 1)) $IZ0"
+fill_box "$IX0" "$Y0" "$IZ0" "$((IX0 + 2))" $((Y0 + 2)) "$((IZ0 + 2))" bigreactors:energizercasing
+place "$((IX0 + 1))" $((Y0 + 1)) "$((IZ0 + 1))" bigreactors:energizercell
+place $I_CONTROLLER bigreactors:energizercontroller
+place "$((IX0 + 2))" $((Y0 + 1)) "$((IZ0 + 1))" bigreactors:energizercontroller
+place "$IX0" $((Y0 + 1)) "$IZ0" bigreactors:energizerpowerportfe
+place "$IX0" $((Y0 + 1)) "$((IZ0 + 1))" bigreactors:energizerpowerportfe
+ctl wait 10
+line=$(status $I_CONTROLLER)
+echo "  $line"
+case "$line" in
+    *"formed 3x3x3, 1 cells"*) ;;
+    *) fail "the two-controller energizer did not form: $line" ;;
+esac
+click_from 132.5 101 5.5 $I_CONTROLLER east
+ctl wait 20
+line=$(status $I_CONTROLLER)
+visits=$(sed -nE 's/.* visits=([0-9]+).*/\1/p' <<<"$line")
+echo "  visits a tick: $line"
+[ "$(active_of "$line")" = true ] || fail "the two-controller energizer did not switch on: $line"
+[ "$visits" = 2 ] \
+    || fail "the machine served '$visits' port visits a tick, not one per port (2): $line"
+click_from 132.5 101 5.5 $I_CONTROLLER east
+ctl wait 20
+line=$(status $I_CONTROLLER)
+visits=$(sed -nE 's/.* visits=([0-9]+).*/\1/p' <<<"$line")
+echo "  visits a tick while off: $line"
+[ "$(active_of "$line")" = false ] || fail "the energizer did not switch off: $line"
+[ "$visits" = 0 ] || fail "an off machine served '$visits' port visits a tick: $line"
+echo "  two controllers on one machine: two port visits a tick when on, none when off"
+fi
+
+echo "PASS: every carried block and item is give-able and place-able, an unknown id is refused, all nine shaped recipes craft with their declared id and count and consume their ingredients (two wrong-ingredient controls stay empty), the four graphite cooking recipes produce graphite, every block drops itself, the 3x3x3 reactor forms and holds the upstream 126.8 FE/t and 0.028 mB/t with a working tap and a receive face, and a 3x3x3 energizer forms at 683212743470724 FE, refuses FE while off, charges from the reactor's tap when on, pushes its FE into the reactor through its output port, scales to 27x at 5x5x5, stops pushing when switched off, and keeps its readout across an unrelated break while a broken shell is re-proven, one energizer serves two adjacent reactors, and a tick that invalidates five machines runs only the budgeted four fresh scans while a status read outside a tick still scans, a tank with room for one ingot keeps the other three of a stack in the port, a machine rebuilt smaller leaves its detached old port inert while the new one still passes FE, and a two-controller machine serves each port once a tick and none while off"

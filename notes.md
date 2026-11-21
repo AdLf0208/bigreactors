@@ -477,9 +477,263 @@ is `blocked(no-energy-cable)`.
   (upstream's two GUI buttons).
 - **The artefact is 2.4.9**, not the filename's 2.4.28 (see the slice section).
 
+## Review fix (2026-11-21) — one record per machine, one visit per port, membership on access (0.2.5)
+
+**The finding** (council review of PR #1501, 2026-11-21 02:18, reviewed head `ab2bd6c1`), verbatim:
+
+> Package hash, owner, MIT licence and dependencies are fine, and the earlier uncharged
+> capability-scan path is fixed. Two things need a fix before listing: (1) Server stall and memory
+> growth: `src/lib.rs:241` deep-clones the full energizer shape per controller, and `src/lib.rs:875`
+> visits every port from every controller on every tick, even when the machine is off. A valid 32³
+> shape keeps about 381 MiB in coordinate vectors, and a controller/port split can cause over 8
+> million port visits per tick. Please share one formation record, process ports once per machine,
+> and add a many-controller regression test. (2) `src/lib.rs:1096` trusts saved controller
+> coordinates and the controller's `formed` bit, so after a machine is rebuilt smaller around the
+> same controller, a disconnected old port can still reach its energy buffer. Please require current
+> formation membership on port access, with a detached-port test. Existing follow-up from 0.2.1:
+> the reactor clears the whole fuel stack even when the tank can take only part of it.
+
+All four were real. The reviewer's line numbers are the reviewed head's; each behaviour was
+located, reproduced and then fixed.
+
+### The red, verbatim, before any fix
+
+**Finding 1 — a copy of the machine record per controller** (`sdk-test-red-1121-f1.log`). The test
+runs against the **delivered 0.2.4 package's own `src/lib.rs` + `src/runtime.rs`** (kept for
+re-audit at `ports/_shared/evidence/bigreactors/retired-0.2.4-src/`: `lib.rs` sha256 `4406876e…`,
+`runtime.rs` `934fec99…b02b`, from the 0.2.4 game the launcher built), with one test that counts the
+deep copies of a machine record:
+
+```
+test review_1121_red::a_machines_formation_is_stored_once_and_shared ... FAILED
+
+thread 'review_1121_red::a_machines_formation_is_stored_once_and_shared' (3478168) panicked at src/lib.rs:1926:9:
+assertion `left == right` failed: the machine's record was deep-copied once per controller
+  left: 4
+ right: 0
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 56 filtered out; finished in 0.00s
+```
+
+Four controllers, four deep copies. A 32³ shell can be **5,768** controller/port blocks, and each
+copy held all 5,768 coordinates: 5,768 × 5,768 × 12 B ≈ **399 MB ≈ 381 MiB** — the reviewer's
+number, from the code path they named (`Formations::insert` cloning `Proven<T>` per key, with
+`answer: Result<T, String>`).
+
+**Finding 2 — every controller walks every port** (`sdk-test-red-1121-f2.log`). The per-port loop
+was extracted into a seam (`visit_machine_ports`) with **0.2.4's policy restored verbatim** — every
+controller visits every port, and a switched-off machine visits them too (it announced itself to
+each one) — and the shipping regression test run against it:
+
+```
+test tests::a_machine_visits_its_ports_once_per_tick_however_many_controllers_it_has ... FAILED
+
+thread 'tests::a_machine_visits_its_ports_once_per_tick_however_many_controllers_it_has' (3481318) panicked at src/lib.rs:2259:9:
+assertion `left == right` failed: N controllers must cost O(ports) visits, not O(N x ports)
+  left: 8
+ right: 2
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.00s
+```
+
+Eight visits for 4 controllers × 2 ports; the test asserts the count, never wall time. In game the
+same defect shows as the absence of any accounting at all (the same phase against the delivered
+package, `e2e-024-red-f2-visits.log`):
+
+```
+  visits a tick: Energizer at 131,102,5: formed 3x3x3, 1 cells, 0/683212743470724 FE, active true, t=189, scans=0
+FAIL: the machine served '' port visits a tick, not one per port (2): …
+```
+
+**Finding 3 — a rebuilt-smaller machine's old port still answers** (`e2e-024-red-f3-detached-port.log`,
+the **delivered 0.2.4 package**, in game). A 5×5×5 energizer whose old port sits against a reactor's
+full tap, rebuilt into a 3×3×3 around the same controller; the detached port still reports the
+*current* machine's buffer:
+
+```
+  new port: Energizer Power Port at 122,102,7: input, 0/683212743470724 FE, t=484
+  old port: Energizer Power Port at 118,102,6: input, 0/683212743470724 FE, t=489
+FAIL: the detached old port still answers for the machine: Energizer Power Port at 118,102,6: input, 0/683212743470724 FE, t=489
+```
+
+**Finding 4 — the whole fuel stack is cleared** (`e2e-024-red-f4-partial-fuel.log`, the delivered
+package). A tank at 3,000 of its 4,000 mB takes one ingot of a four-ingot stack and the other three
+vanish:
+
+```
+  after three ingots: Reactor at 105,102,6: formed 3x3x3, 1 fuel rods, 1 control rods, 0/216000 FE, fuel 3000, waste 0, heat 20.0, fuel heat 0.0, active false, t=142, scans=0
+  after a four-ingot stack: Reactor at 105,102,6: formed 3x3x3, 1 fuel rods, 1 control rods, 0/216000 FE, fuel 4000, waste 0, heat 20.0, fuel heat 0.0, active false, t=159, scans=0
+  Access Port at 105,102,8: empty, t=165
+FAIL: the access port reads 'Access Port at 105,102,8: empty, t=165', not the three ingots the tank had no room for
+```
+
+### What changed
+
+| Before (0.2.4) | Now (0.2.5) |
+|---|---|
+| `Proven<T>.answer: Result<T, String>`, and `Formations::insert` cloned the record for every controller: one 32³ coordinate list per controller | `Answer<T> = Result<Arc<T>, Arc<str>>`: one record per machine, shared by every controller **and** every port it answers through. `Proven<T>: Clone` is hand-written (two `Arc` bumps + the box) so no derive can reintroduce a `T: Clone` deep copy |
+| the scan cached its answer for the machine's controllers only, so a port's capability call was a fresh scan | the scan's key list is `controllers ∪ ports` (plus the block it was asked from), so a port capability is a cache hit and never a scan of its own |
+| every controller ran `for port in shape.ports { announce; push }` on every tick, and `announce_port` wrote `cx/cy/cz` to each port even while the machine was off | **one master controller per machine** (`EnergizerShape::master_controller`, the lowest coordinate), and `visit_machine_ports` claims the machine once per level tick (`MACHINE_TICKS`, keyed by level + master): the machine costs `ports` visits a tick, a non-claiming controller costs 0, and a switched-off machine costs 0. `announce_port` is gone |
+| a port answered from the `cx/cy/cz` it remembered plus the controller's `formed` bit — the saved coordinate *was* the membership | `machine_at` floods the shape **from the asking block** and requires `in_formation(shape, pos)` (a current controller or a current port). The saved coordinates are neither written nor read; a port the current shape does not list answers **0 capacity and 0 accepted** |
+| the port's buffer answer came from a saved `capacity` long and the `formed` byte | both are gone: capacity is `design.capacity()` of the current formation, and an off machine reports 0 both ways (upstream: "an inactive machine refuses insert and extract") |
+| `take_fuel` took the whole slot stack and `insert_ingots` dropped what did not fit | `Reactor::ingots_that_fit` (whole ingots of the tank's remaining room) and `take_fuel(…, max_ingots)` split the stack with `ItemStack::split`, writing the **remainder back into the slot** |
+| a click on a second controller toggled that controller's own NBT (which nothing read) | a click on any controller toggles the machine's master: every controller is the same control surface, as upstream's one assembled multiblock is |
+
+**The mechanism, in one paragraph.** A formation scan produces one record — the energizer's
+`EnergizerFormed` (design + `EnergizerShape`: box, parts, cells, controllers, ports) or the reactor's
+`Formed` — and the cache stores it behind an `Arc` under every block that answers for the machine
+(its controllers and its ports), so memory is one record per machine and a port's capability lookup
+is the same cache hit a controller's tick gets. The machine's tick runs on its master controller
+only; the first of its controllers to tick in a level tick claims it and walks the port list once,
+and a switched-off machine walks nothing. A port's capability access re-derives its membership from
+the world (`energizer_read_scan` from the port's own position, cached and budgeted like every other
+scan) instead of trusting saved coordinates, so a rebuild that leaves the port outside the box
+detaches it immediately.
+
+### Tests (written first, watched red)
+
+Runtime (pure): `a_machine_has_one_master_controller_by_position` (a shell of four controllers has
+one master, the lowest), `a_port_is_a_member_only_of_the_formation_that_contains_it` (a 5³ shape and
+the 3³ rebuilt from the same controller: the old port is not a member, the new one is),
+`the_tank_takes_only_the_whole_ingots_it_has_room_for` (4,000/3,000/3,500/4,000 mB → 4/1/0/0 ingots).
+Glue: `a_machines_formation_is_stored_once_and_shared` (0 deep copies, and two controllers'
+answers are the same allocation by `Arc::ptr_eq`),
+`a_machine_visits_its_ports_once_per_tick_however_many_controllers_it_has` (4 controllers × 2 ports →
+2 visits, per tick, and 0 when off), `a_port_the_current_formation_does_not_list_is_not_a_member`
+(the membership predicate the capability path uses).
+**62 tests** in total (56 before this fix).
+
+### In-game proof (phases G/H/I, `--offscreen`, the launcher build)
+
+```
+== G: a 4-ingot stack into a tank with room for one keeps three in the port ==
+  Reactor at 105,102,6: formed 3x3x3, 1 fuel rods, 1 control rods, 0/216000 FE, fuel 0, waste 0, heat 20.0, fuel heat 0.0, active false, t=6095, scans=3
+  after three ingots: Reactor at 105,102,6: formed 3x3x3, 1 fuel rods, 1 control rods, 0/216000 FE, fuel 3000, waste 0, heat 20.0, fuel heat 0.0, active false, t=6120, scans=0
+  after a four-ingot stack: Reactor at 105,102,6: formed 3x3x3, 1 fuel rods, 1 control rods, 0/216000 FE, fuel 4000, waste 0, heat 20.0, fuel heat 0.0, active false, t=6139, scans=0
+  Access Port at 105,102,8: bigreactors:yellorium_ingot x3, t=6145
+  one ingot of four went into the tank; three stayed in the slot
+== H: rebuild a 5x5x5 energizer smaller around its controller ==
+  Energizer at 122,101,9: formed 5x5x5, 27 cells, 0/18446744073709548 FE, active false, t=6232, scans=4, visits=0
+  before the rebuild: Energizer at 122,101,9: formed 5x5x5, 27 cells, 26037/18446744073709548 FE, active true, t=6889, scans=0, visits=2
+  -- rebuild the same controller into a 3x3x3: (118..122,101..105,5..9) -> (120..122,101..103,7..9)
+  Energizer at 122,101,9: formed 3x3x3, 1 cells, 0/683212743470724 FE, active false, t=6955, scans=4, visits=0
+  new port: Energizer Power Port at 122,102,7: input, 0/683212743470724 FE, t=6961
+  old port: Energizer Power Port at 118,102,6: not formed, input, t=6968
+  before the wait: energizer 0 FE, H1's tap 15470 FE (Power Tap at 117,102,6: 15470/50000 FE, t=7017)
+  after 200 ticks: energizer 0 -> 0 FE while the tap offers its buffer to the old port
+  -- the new port still works: reactor H2's tap stands against it
+  after H2's tap: energizer 1109 -> 25910 FE through the new port
+== I: two controllers and two ports cost two visits a tick, and none while off ==
+  visits a tick: Energizer at 131,102,5: formed 3x3x3, 1 cells, 0/683212743470724 FE, active true, t=7678, scans=0, visits=2
+  visits a tick while off: Energizer at 131,102,5: formed 3x3x3, 1 cells, 0/683212743470724 FE, active false, t=7740, scans=0, visits=0
+  two controllers on one machine: two port visits a tick when on, none when off
+```
+
+- **G** feeds 3 ingots (3,000 mB of the tank's 4,000), then a stack of **four**: the tank takes
+  exactly one and the port keeps **three** (`yellorium_ingot x3`), where 0.2.4 destroyed them.
+- **H** first proves the old port *works* (the 5³ charges to 26,037 FE from H1's tap through it,
+  `visits=2` for its two ports), then rebuilds the same controller into a 3³: the new port is a
+  member and the old one reads `not formed`; with H1's tap full (15,470 FE) and offering its buffer
+  to that very block every tick, the rebuilt machine's buffer stays at **0** for 200 ticks. Then
+  reactor H2's tap, standing against the *new* port, charges the machine 1,109 → 25,910 FE.
+- **I** is the many-controller machine: two controllers and two ports read `visits=2` when on (not
+  4) and `visits=0` when off.
+- Each assertion is fail-capable, and its counterfactual is the **same phase against the delivered
+  0.2.4 package** (`e2e-024-red-f2/f3/f4-*.log`, each `FAIL` + `EXIT:1`).
+
+### Coverage (this slice's families)
+
+| family | status |
+|---|---|
+| one formation record per machine, shared by its controllers | tested — `a_machines_formation_is_stored_once_and_shared` (0 deep copies, `Arc::ptr_eq`) |
+| ports visited once per machine per tick, none while off | tested — `a_machine_visits_its_ports_once_per_tick_however_many_controllers_it_has` (8 → 2 visits) and phase I (`visits=2` / `visits=0`) |
+| membership on port access (a rebuild leaves the old port inert) | tested — `a_port_the_current_formation_does_not_list_is_not_a_member`, `a_port_is_a_member_only_of_the_formation_that_contains_it`, phase H |
+| partial fuel take (the remainder stays in the slot) | tested — `the_tank_takes_only_the_whole_ingots_it_has_room_for`, phase G |
+| every earlier family (reactor, energizer, content, recipes, loot, budget) | tested — phases A–F unchanged and green in the same leg |
+| one master per **reactor** (a reactor with several controllers still simulates once per controller, each in its own saved compound) | not ported — the review named the energizer's port walk, which is fixed; the reactor has the same shape of defect (N controllers = N simulations sharing the taps) and is the next slice's family |
+
+### Deviations added by this slice
+
+- **The machine's buffer lives in its master controller.** A shell of several controllers used to
+  give each controller its own `energy`/`active` and let each of them tick, with ports answering
+  whichever controller announced itself last. One master (the lowest coordinate) owns the state now;
+  a secondary controller's old `energy` key is ignored, and clicking any controller toggles the
+  master (upstream's one assembled multiblock has one control surface).
+- **The `formed` byte and the `capacity` long are no longer written.** Both were the trust the review
+  removed; capacity is the current formation's design and membership is the current shape. Saves
+  from 0.2.4 and earlier still carry both keys, and nothing reads them.
+- **A port the current shape does not list reports 0 capacity**, where 0.2.4 reported the buffer of
+  a controller it remembered. That is the review's requirement, and it also means a *forming*
+  machine's ports answer 0 until the next scan proves the shape (one tick).
+- **`visits=` is added to the energizer's status line** (the ports this machine served in the last
+  tick) for the same reason `scans=` exists: a bound nothing can read cannot be asserted in game.
+
+### Known limitation of the shared record
+
+The record is shared per *scan*, not per *machine lifetime*: a block change inside the machine's box
+drops the proof (0.2.3's rule) and the next scan builds a new `Arc`. That is the intended budget
+behaviour — one allocation per re-proof, not one per controller.
+
+The `visits=` diagnostic keeps one small entry per machine it has served (keyed by level + master,
+so a rebuilt machine reuses its own), and entries are updated in place, not appended per tick: it
+does not grow with uptime. A machine removed from the world leaves one entry behind until the
+session ends.
+
+Skills: superpowers/using-superpowers,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
+
 ## Verification
 
 Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices,rust-port
+
+### 0.2.5 — one record, one visit, membership on access (2026-11-21)
+
+At the working pin **`0a875da`** + mixins **`e59da90`** (repinned from `0b14f8a` in this slice;
+`.horizon/sdk` was deleted so the tool refetched, and the baseline leg below is the proof the pin
+move changed no behaviour). Every command ran directly in the port with `CARGO_INCREMENTAL=0`
+inside a build-slot lease; logs are `ports/_shared/evidence/bigreactors/sdk-*.log` and
+`…/bigreactors-e2e/`.
+
+| Step | Command | Result |
+|---|---|---|
+| baseline before any edit | `cargo test --offline`, then the unchanged e2e leg | **56 passed**; `e2e-0a875da-baseline.log` **PASS + EXIT:0** (the repin alone) |
+| red (finding 1) | the F1 test on the delivered package's own sources | `left: 4, right: 0` (`sdk-test-red-1121-f1.log`) |
+| red (finding 2) | the F2 test with 0.2.4's loop policy restored | `left: 8, right: 2` (`sdk-test-red-1121-f2.log`) |
+| red (findings 3, 4, and 2 in game) | phases H/G/I against the delivered 0.2.4 package | `FAIL` + `EXIT:1` each (`e2e-024-red-f3-detached-port.log`, `…-f4-partial-fuel.log`, `…-f2-visits.log`) |
+| tests | `cargo test --offline` | **62 passed, 0 failed** (`sdk-test.log`) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| format | `cargo fmt --check` | clean (`sdk-fmt.log`) |
+| package | `rm -f Cargo.lock && cargo horizon-mod build` twice | **87,747 B**, sha256 `0f5f3698…20f2`, `cmp` identical (`sdk-build.log`, `sdk-build-second.log`, `sdk-reproducible.txt`) |
+| check | `cargo horizon-mod check bigreactors.hmod` | `bigreactors 0.2.5 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, exit 0 (`sdk-check.log`) |
+| fits (pin) | `cargo horizon-mod fits bigreactors.hmod --build 0a875da` | `0a875da  made for`, exit 0 (`sdk-fits.log`) — a tautology for a package made for the pin |
+| fits (another build) | `cargo horizon-mod fits bigreactors.hmod --build 0b14f8a` | `0b14f8a  fits`, exit 0 (same log) — the package also fits the previous pin, so its hooks are not build-specific |
+| package gate | `python3 ports/tools/verify-sdk-package.py bigreactors` | **1/1** (107 entries, no packed lock, runtime byte-identical) |
+| in game | `tools/e2e.sh` on the launcher build | **`PASS` + `EXIT:0`** (`e2e-launcher.log`) |
+| control | `GAME=$CONTROL_GAME`, same script | **`FAIL: give bigreactors:basic_reactorcasing failed` + `EXIT:1`** (`e2e-launcher-control.log`) |
+| selftest | `SELFTEST=1` | **`FAIL: 999999 FE in 332 ticks …` + `EXIT:1`** (`e2e-launcher-selftest.log`) |
+| negative | `NEGATIVE=1` | **`FAIL: the energizer capacity is … not 1` + `EXIT:1`** (`e2e-launcher-negative.log`) |
+| peak negative | `PEAK_NEGATIVE=1` | **`FAIL: … ran 4 fresh scans, not the budgeted 5` + `EXIT:1`** (`e2e-launcher-peak-negative.log`) |
+| log gate | `python3 ports/tools/check-e2e-logs.py bigreactors-e2e --strict` | `logs=10 ok=10 missing-exit=0 bad-exit=0` |
+
+Delivered artifact: `bigreactors.hmod` (= `extreme_reactors.hmod`) **87,747 B**, SHA-256
+`0f5f3698be82cf9f13d745ac0c960d0fc92a152355d80b0825aa6f3e3ac920f2`, **107 entries**, no
+`Cargo.lock`. `src/runtime.rs` gained the three pure helpers (`master_controller`, `contains_port`,
+`ingots_that_fit`); sha256 `4af927944521…` (tree and packed, `verify-sdk-package` agrees).
+
+### Changelog for the resubmission (supersedes 0.2.4)
+
+> **0.2.5 — one record, one visit, membership on access.** A machine's formation record is stored
+> once and shared (`Arc`) by every controller and port that answers for it, not deep-copied per
+> controller; a 32³ shell of controllers no longer holds ~381 MiB of duplicate coordinates. The
+> machine ticks on one master controller and its ports are visited once per machine per level tick
+> (never while it is off): N controllers cost O(ports), not N × ports. A power port's capability
+> now requires membership of the *current* formation, so a machine rebuilt smaller leaves its old
+> port answering 0 capacity / 0 accepted instead of reaching the buffer; the saved controller
+> coordinates and the `formed` bit are gone. A reactor takes only the whole ingots its tank has room
+> for and leaves the rest of the stack in the slot. Package: **107 entries, 87,747 B**, sha256
+> `0f5f3698…20f2`; `check` exit 0, `fits` exit 0 against the pin (`made for`) and against
+> `0b14f8a` (`fits`); 62 tests, clippy `-D warnings` clean; in game `PASS` + `EXIT:0`, the unmodded
+> Nightly `EXIT:1`, `SELFTEST=1`/`NEGATIVE=1`/`PEAK_NEGATIVE=1` `EXIT:1`, and the same G/H/I phases
+> against the delivered 0.2.4 package `EXIT:1`.
 
 ### 0.2.0 — the SDK package
 
